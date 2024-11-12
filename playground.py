@@ -61,8 +61,8 @@ def main():
 
         print(reconstructed_image.shape)
         
-        save_image(image, 'input_image.jpg')
-        save_image(reconstructed_image, 'output_image.jpg')
+        save_image(image, 'example_images/input_image.jpg')
+        save_image(reconstructed_image, 'example_images/output_image.jpg')
     else:
         train_ds, test_ds = prepare_dataset(params.batch_size)
         loss = model.evaluate(test_ds)
