@@ -9,3 +9,4 @@ EXPERIMENT_NAME = default
 CHECKPOINT_FILEPATH = checkpoint.ckpt
 INITIAL_EPOCH = 99
 MODE = test #test, train 
+DATASET = cifar10 #cifar10, eurosatRGB
