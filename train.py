@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import argparse
 import configparser
 
+from tensorflow.keras.utils import plot_model
+
 from models.model import deepJSCC
 
 from utils.datasets import dataset_generator
@@ -19,16 +21,35 @@ def main():
 
     params = read_config(args.config_file, args.config_name)
 
+
+    if params.dataset == 'cifar10':
+        print('Using CIFAR10 dataset')
+        setattr(params,'train_dir', './dataset/CIFAR10/train/')
+        setattr(params,'test_dir', './dataset/CIFAR10/test/')
+        setattr(params,'image_width', 32)
+        setattr(params,'image_height', 32)
+        setattr(params,'image_channels', 3)
+    elif params.dataset == 'eurosatrgb':
+        print('Using Eurosat RGB dataset')
+        setattr(params,'train_dir', './dataset/EuroSAT_RGB_split/train/')
+        setattr(params,'test_dir', './dataset/EuroSAT_RGB_split/test/')
+        setattr(params,'image_width', 64)
+        setattr(params,'image_height', 64)
+        setattr(params,'image_channels', 3)
+    else:
+        print(params.dataset + ' not accepted (check spelling)')
+
     for key, value in vars(params).items():
         print(f"{key} = {value}, Type: {type(value)}")
 
-    train_ds, test_ds = prepare_dataset(params.batch_size)
+    train_ds, test_ds = prepare_dataset(params)
 
     EXPERIMENT_NAME = params.experiment_name
     print(f'Running {EXPERIMENT_NAME}')
 
     
     model = deepJSCC(
+        input_size = params.image_width,
         has_gdn=params.has_gdn,
         num_symbols=params.data_size,
         snrdB=params.train_snrdb,
@@ -49,8 +70,10 @@ def main():
         ]
     )
 
-    model.build(input_shape=(None, 32, 32, 3))
+    model.build(input_shape=(None, params.image_width, params.image_height, params.image_channels))
     model.summary()
+
+    plot_model(model, to_file='example_images/model_plot.png', show_shapes=True, show_layer_names=True)
     
     if args.ckpt is not None:
         model.load_weights(args.ckpt)
@@ -76,7 +99,7 @@ def main():
         validation_data=test_ds,
     )
 
-    model.save_weights('models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
+    model.save_weights('models/saved_models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
     #model.save('models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
 
 def check_gpu():
@@ -85,10 +108,10 @@ def check_gpu():
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 
-def prepare_dataset(BATCH_SIZE):
+def prepare_dataset(params):
     AUTO = tf.data.experimental.AUTOTUNE
-    test_ds = dataset_generator('./dataset/CIFAR10/test/', BATCH_SIZE = BATCH_SIZE)
-    train_ds = dataset_generator('./dataset/CIFAR10/train/', BATCH_SIZE = BATCH_SIZE).cache()
+    test_ds = dataset_generator(params.test_dir, params)
+    train_ds = dataset_generator(params.train_dir, params).cache()
 
     class_names = test_ds.class_names
     print(class_names) 

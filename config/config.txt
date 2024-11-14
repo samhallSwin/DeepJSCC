@@ -1,12 +1,12 @@
 [default]
 BATCH_SIZE = 64
-EPOCHS = 100
+EPOCHS = 10
 TRAIN_SNRDB = 15
 HAS_GDN = True
 DATA_SIZE = 512
 CHANNEL_TYPE = AWGN
-EXPERIMENT_NAME = default
+EXPERIMENT_NAME = eurosat_RGB_test
 CHECKPOINT_FILEPATH = checkpoint.ckpt
-INITIAL_EPOCH = 99
-MODE = test #test, train 
-DATASET = cifar10 #cifar10, eurosatRGB
+INITIAL_EPOCH = 0
+MODE = test 
+DATASET = eurosatrgb

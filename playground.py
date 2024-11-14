@@ -7,25 +7,43 @@ from utils.datasets import dataset_generator
 
 def main():
 
-    single_image_pass = False
+    single_image_pass = True
 
     params = read_config('config/config.txt', 'default')
+
+    if params.dataset == 'cifar10':
+        print('Using CIFAR10 dataset')
+        setattr(params,'train_dir', './dataset/CIFAR10/train/')
+        setattr(params,'test_dir', './dataset/CIFAR10/test/')
+        setattr(params,'image_width', 32)
+        setattr(params,'image_height', 32)
+        setattr(params,'image_channels', 3)
+    elif params.dataset == 'eurosatrgb':
+        print('Using Eurosat RGB dataset')
+        setattr(params,'train_dir', './dataset/EuroSAT_RGB_split/train/')
+        setattr(params,'test_dir', './dataset/EuroSAT_RGB_split/test/')
+        setattr(params,'image_width', 64)
+        setattr(params,'image_height', 64)
+        setattr(params,'image_channels', 3)
+    else:
+        print(params.dataset + ' not accepted (check spelling)')
 
     for key, value in vars(params).items():
         print(f"{key} = {value}, Type: {type(value)}")
 
     model = deepJSCC(
-            has_gdn=params.has_gdn,
-            num_symbols=params.data_size,
-            snrdB=2,
-            channel=params.channel_type
-        )
+        input_size = params.image_width,
+        has_gdn=params.has_gdn,
+        num_symbols=params.data_size,
+        snrdB=10,
+        channel=params.channel_type
+    )
 
-    input_shape = (32,32,3)
+    input_shape = (params.image_width,params.image_height,params.image_channels)
     dummy_input = np.zeros((1,*input_shape))
     model(dummy_input)
 
-    model.load_weights('models/default_100.h5')
+    model.load_weights('models/eurosat_RGB_test_10.h5')
 
 
     model.summary()
@@ -47,7 +65,7 @@ def main():
     
 
     if single_image_pass:
-        image_path = 'dataset/CIFAR10/test/bird/0000.jpg'
+        image_path = 'dataset/EuroSAT_RGB_split/test/Industrial/Industrial_117.jpg'
         image = tf.io.read_file(image_path)
         image = tf.image.decode_jpeg(image, channels=3)
         #image = tf.image.resize(image, [28, 28])  # Resize to match your autoencoder input size
@@ -62,19 +80,22 @@ def main():
         print(reconstructed_image.shape)
         
         save_image(image, 'example_images/input_image.jpg')
+        
+
         save_image(reconstructed_image, 'example_images/output_image.jpg')
+        
     else:
-        train_ds, test_ds = prepare_dataset(params.batch_size)
+        train_ds, test_ds = prepare_dataset(params)
         loss = model.evaluate(test_ds)
         print(f"Loss: {loss}")   
 
 
     
 
-def prepare_dataset(BATCH_SIZE):
+def prepare_dataset(params):
     AUTO = tf.data.experimental.AUTOTUNE
-    test_ds = dataset_generator('./dataset/CIFAR10/test/', BATCH_SIZE = BATCH_SIZE)
-    train_ds = dataset_generator('./dataset/CIFAR10/train/', BATCH_SIZE = BATCH_SIZE).cache()
+    test_ds = dataset_generator(params.test_dir, params)
+    train_ds = dataset_generator(params.train_dir, params).cache()
 
     class_names = test_ds.class_names
     print(class_names) 

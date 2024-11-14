@@ -5,7 +5,7 @@ from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 
 class deepJSCC(tf.keras.Model):
     def __init__(self, has_gdn=True,
-                 num_symbols=512, snrdB=25, channel='AWGN'):
+                 num_symbols=512, snrdB=25, channel='AWGN', input_size=32):
         
         super().__init__()
         if has_gdn:
@@ -26,6 +26,7 @@ class deepJSCC(tf.keras.Model):
             filters[:3],
             num_blocks[:3],
             num_symbols,
+            input_size=input_size,
             gdn_func=gdn_func
         )
 
@@ -44,6 +45,7 @@ class deepJSCC(tf.keras.Model):
             block_types[3:],
             filters[3:],
             num_blocks[3:],
+            input_size=input_size,
             gdn_func=igdn_func
         )
     
@@ -56,23 +58,45 @@ class deepJSCC(tf.keras.Model):
     
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, block_types, filters, num_blocks,
-                 num_symbols, gdn_func=None, **kwargs):
+                 num_symbols, gdn_func=None, input_size = 32, **kwargs):
         super().__init__()
-        self.layers = [
-            # 32 x 32 input
-            build_blocks(0, block_types, num_blocks, filters, 32, kernel_size=9, stride=2, gdn_func=gdn_func),
-            # downsampled to 16 x 16
-            build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, stride=2, gdn_func=gdn_func),
-            # downsampled to 8 x 8
-            build_blocks(2, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
-            # to constellation
-            tf.keras.layers.Conv2D(
-                filters=num_symbols // 8 // 8 * 2,
-                # current spatial dimension is 8 x 8
-                # and 2 for iq dimension
-                kernel_size=1
-            )
-        ]
+
+        if input_size==64:
+            self.layers = [
+                # 64 x 64 input
+                build_blocks(0, block_types, num_blocks, filters, 64, kernel_size=9, stride=2, gdn_func=gdn_func),
+                # 32 x 32 input
+                build_blocks(0, block_types, num_blocks, filters, 32, kernel_size=9, stride=2, gdn_func=gdn_func),
+                # downsampled to 16 x 16
+                build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, stride=2, gdn_func=gdn_func),
+                # downsampled to 8 x 8
+                build_blocks(2, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
+                # to constellation
+                tf.keras.layers.Conv2D(
+                    filters=num_symbols // 8 // 8 * 2,
+                    # current spatial dimension is 8 x 8
+                    # and 2 for iq dimension
+                    kernel_size=1
+                )
+            ]
+        elif input_size==32:
+            self.layers = [
+                # 32 x 32 input
+                build_blocks(0, block_types, num_blocks, filters, 32, kernel_size=9, stride=2, gdn_func=gdn_func),
+                # downsampled to 16 x 16
+                build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, stride=2, gdn_func=gdn_func),
+                # downsampled to 8 x 8
+                build_blocks(2, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
+                # to constellation
+                tf.keras.layers.Conv2D(
+                    filters=num_symbols // 8 // 8 * 2,
+                    # current spatial dimension is 8 x 8
+                    # and 2 for iq dimension
+                    kernel_size=1
+                )
+            ]
+        else:
+            print('Incorrect input size!')
 
     def call(self, x):
         for sublayer in self.layers:
@@ -89,24 +113,48 @@ class Encoder(tf.keras.layers.Layer):
     
 
 class Decoder(tf.keras.layers.Layer):
-    def __init__(self, block_types, filters, num_blocks, gdn_func=None, **kwargs):
+    def __init__(self, block_types, filters, num_blocks, gdn_func=None, input_size=32, **kwargs):
         super().__init__()
-        self.layers = [
-            # 8 x 8 input
-            build_blocks(0, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
-            # upsampled to 16 x 16
-            tf.keras.layers.Resizing(16, 16),
-            build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, gdn_func=gdn_func),
-            # upsampled to 32 x 32
-            tf.keras.layers.Resizing(32, 32),
-            build_blocks(2, block_types, num_blocks, filters, 32, kernel_size=9, gdn_func=gdn_func),
-            # to image
-            tf.keras.layers.Conv2D(
-                filters=3,
-                kernel_size=1,
-                activation='sigmoid'
-            )
-        ]
+
+        if input_size==64:
+            self.layers = [
+                # 8 x 8 input
+                build_blocks(0, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
+                # upsampled to 16 x 16
+                tf.keras.layers.Resizing(16, 16),
+                build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, gdn_func=gdn_func),
+                # upsampled to 32 x 32
+                tf.keras.layers.Resizing(32, 32),
+                build_blocks(2, block_types, num_blocks, filters, 32, kernel_size=9, gdn_func=gdn_func),
+                # upsampled to 64 x 64
+                tf.keras.layers.Resizing(64, 64),
+                build_blocks(2, block_types, num_blocks, filters, 64, kernel_size=9, gdn_func=gdn_func),
+                # to image
+                tf.keras.layers.Conv2D(
+                    filters=3,
+                    kernel_size=1,
+                    activation='sigmoid'
+                )
+            ] 
+        elif input_size==32:  
+            self.layers = [
+                # 8 x 8 input
+                build_blocks(0, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
+                # upsampled to 16 x 16
+                tf.keras.layers.Resizing(16, 16),
+                build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, gdn_func=gdn_func),
+                # upsampled to 32 x 32
+                tf.keras.layers.Resizing(32, 32),
+                build_blocks(2, block_types, num_blocks, filters, 32, kernel_size=9, gdn_func=gdn_func),
+                # to image
+                tf.keras.layers.Conv2D(
+                    filters=3,
+                    kernel_size=1,
+                    activation='sigmoid'
+                )
+            ]
+        else:
+            print('Incorrect input size!')
 
 
     def call(self, x):
