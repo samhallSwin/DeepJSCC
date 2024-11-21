@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import configparser
+from config import config
+from utils import image_proc
 
 from tensorflow.keras.utils import plot_model
 
@@ -16,50 +18,37 @@ from models.model import deepJSCC
 from utils.datasets import dataset_generator
 
 def main():
-    args = parse_args()
+    args = parse_args() #TODO read other config file 
     check_gpu()
 
-    params = read_config(args.config_file, args.config_name)
+    #Set dataset relevant params in config.[param]
+    config.setImageParamsFromDataset()
 
+    print(f"Image size {config.image_width} X {config.image_height} X {config.image_channels}")
 
-    if params.dataset == 'cifar10':
-        print('Using CIFAR10 dataset')
-        setattr(params,'train_dir', './dataset/CIFAR10/train/')
-        setattr(params,'test_dir', './dataset/CIFAR10/test/')
-        setattr(params,'image_width', 32)
-        setattr(params,'image_height', 32)
-        setattr(params,'image_channels', 3)
-    elif params.dataset == 'eurosatrgb':
-        print('Using Eurosat RGB dataset')
-        setattr(params,'train_dir', './dataset/EuroSAT_RGB_split/train/')
-        setattr(params,'test_dir', './dataset/EuroSAT_RGB_split/test/')
-        setattr(params,'image_width', 64)
-        setattr(params,'image_height', 64)
-        setattr(params,'image_channels', 3)
-    else:
-        print(params.dataset + ' not accepted (check spelling)')
+    train_ds, test_ds = prepare_dataset(config)
 
-    for key, value in vars(params).items():
-        print(f"{key} = {value}, Type: {type(value)}")
-
-    train_ds, test_ds = prepare_dataset(params)
-
-    EXPERIMENT_NAME = params.experiment_name
-    print(f'Running {EXPERIMENT_NAME}')
+    print(f'Running {config.experiment_name}')
 
     
     model = deepJSCC(
-        input_size = params.image_width,
-        has_gdn=params.has_gdn,
-        num_symbols=params.data_size,
-        snrdB=params.train_snrdb,
-        channel=params.channel_type
+        input_size = config.image_width,
+        has_gdn=config.has_gdn,
+        num_symbols=config.data_size,
+        snrdB=config.train_snrdB,
+        channel=config.channel_type
     )
-    #display_image(train_ds)
+    
+    if config.workflow == "train": 
+        train_model(model, config, train_ds, test_ds, args)
+    elif config.workflow == "loadAndTest": 
+        load_and_analyse(model, config, train_ds, test_ds, args)
+    else:
+        print('No valid workflow detected (Check spelling)')
+    
+    #model.save('models/' + f"{config.experiment_name}_" + f"{config.epochs}" + '.h5')
 
-    def psnr(y_true, y_pred):
-        return tf.image.psnr(y_true, y_pred, max_val=1)
-  
+def train_model(model, config, train_ds, test_ds, args):
     model.compile(
         loss='mse',
         optimizer=tf.keras.optimizers.legacy.Adam(
@@ -70,7 +59,7 @@ def main():
         ]
     )
 
-    model.build(input_shape=(None, params.image_width, params.image_height, params.image_channels))
+    model.build(input_shape=(None, config.image_width, config.image_height, config.image_channels))
     model.summary()
 
     plot_model(model, to_file='example_images/model_plot.png', show_shapes=True, show_layer_names=True)
@@ -80,7 +69,7 @@ def main():
 
     save_ckpt = [
       tf.keras.callbacks.ModelCheckpoint(
-          filepath=f"./ckpt/{EXPERIMENT_NAME}_" + "{epoch}",
+          filepath=f"./ckpt/{config.experiment_name}_" + "{epoch}",
           save_best_only=True,
           monitor="val_loss",
           save_weights_only=True,
@@ -90,17 +79,50 @@ def main():
       )
   ]
 
-    tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{EXPERIMENT_NAME}')
+    tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{config.experiment_name}')
     history = model.fit(
         train_ds,
-        initial_epoch=params.initial_epoch,
-        epochs=params.epochs,
+        initial_epoch=config.initial_epoch,
+        epochs=config.epochs,
         callbacks=[tensorboard, save_ckpt],
         validation_data=test_ds,
     )
 
-    model.save_weights('models/saved_models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
-    #model.save('models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
+    model.save_weights('models/saved_models/' + f"{config.experiment_name}_" + f"{config.epochs}" + '.h5')
+
+def load_and_analyse(model, config, train_ds, test_ds, args):
+    input_shape = (config.image_width,config.image_height,config.image_channels)
+    dummy_input = np.zeros((1,*input_shape))
+    model(dummy_input)
+
+    model.load_weights(f'models/saved_models/{config.modelFile}')
+
+    model.summary()
+
+    model.compile(
+        loss='mse',
+        optimizer=tf.keras.optimizers.legacy.Adam(
+            learning_rate=1e-4
+        ),
+        metrics=[
+            psnr
+        ]
+    )
+
+    output_dir = "example_images"
+    num_images = 8
+    os.makedirs(output_dir, exist_ok=True)
+
+    original_images, processed_images, original_sizes, processed_sizes = image_proc.process_and_save_images(train_ds, model, output_dir, num_images=num_images)
+    output_path = "example_images/visualization.png"
+    image_proc.visualize_and_save_images(original_images, processed_images, original_sizes, processed_sizes, output_path, num_images=num_images)
+    print(f'8 random images captured to /{output_dir}')
+
+
+
+
+def psnr(y_true, y_pred):
+        return tf.image.psnr(y_true, y_pred, max_val=1)
 
 def check_gpu():
     physical_devices = tf.config.experimental.list_physical_devices('GPU')
@@ -108,10 +130,10 @@ def check_gpu():
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 
-def prepare_dataset(params):
+def prepare_dataset(config):
     AUTO = tf.data.experimental.AUTOTUNE
-    test_ds = dataset_generator(params.test_dir, params)
-    train_ds = dataset_generator(params.train_dir, params).cache()
+    test_ds = dataset_generator(config.test_dir, config)
+    train_ds = dataset_generator(config.train_dir, config).cache()
 
     class_names = test_ds.class_names
     print(class_names) 
@@ -147,22 +169,6 @@ def prepare_dataset(params):
 
     return train_ds, test_ds
 
-def read_config(config_file, config_name):
-    config = configparser.ConfigParser()
-    config.read(config_file)
-    
-    if config_name in config:
-        params = type('Params', (object,), {})()
-        for key, value in config[config_name].items():
-            # Attempt to convert the value to an integer
-            try:
-                int_value = int(value)
-                setattr(params, key, int_value)
-            except ValueError:
-                setattr(params, key, value)
-        return params
-    else:
-        raise ValueError(f"Configuration '{config_name}' not found in {config_file}")
 
 def parse_args():
     parser = argparse.ArgumentParser()

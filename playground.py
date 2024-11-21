@@ -1,3 +1,5 @@
+#THIS IS AN OLD NON-FUNCTIONAL FILE, KEPT FOR NOW AS A REFERENCE
+
 import tensorflow as tf
 from models.model import deepJSCC
 import configparser
