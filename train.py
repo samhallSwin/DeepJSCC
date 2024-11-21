@@ -7,184 +7,163 @@ from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
-import configparser
 
 from tensorflow.keras.utils import plot_model
-
 from models.model import deepJSCC
-
 from utils.datasets import dataset_generator
+
+from config import config
+
 
 def main():
     args = parse_args()
     check_gpu()
 
-    params = read_config(args.config_file, args.config_name)
+    print(config.architecture)
+    print(config.arcChoice)
 
-
-    if params.dataset == 'cifar10':
+    # Configure dataset paths and dimensions based on dataset type
+    if config.dataset == 'cifar10':
         print('Using CIFAR10 dataset')
-        setattr(params,'train_dir', './dataset/CIFAR10/train/')
-        setattr(params,'test_dir', './dataset/CIFAR10/test/')
-        setattr(params,'image_width', 32)
-        setattr(params,'image_height', 32)
-        setattr(params,'image_channels', 3)
-    elif params.dataset == 'eurosatrgb':
+        config.train_dir = './dataset/CIFAR10/train/'
+        config.test_dir = './dataset/CIFAR10/test/'
+        config.image_width = 32
+        config.image_height = 32
+        config.image_channels = 3
+    elif config.dataset == 'eurosatrgb':
         print('Using Eurosat RGB dataset')
-        setattr(params,'train_dir', './dataset/EuroSAT_RGB_split/train/')
-        setattr(params,'test_dir', './dataset/EuroSAT_RGB_split/test/')
-        setattr(params,'image_width', 64)
-        setattr(params,'image_height', 64)
-        setattr(params,'image_channels', 3)
+        config.train_dir = './dataset/EuroSAT_RGB_split/train/'
+        config.test_dir = './dataset/EuroSAT_RGB_split/test/'
+        config.image_width = 64
+        config.image_height = 64
+        config.image_channels = 3
     else:
-        print(params.dataset + ' not accepted (check spelling)')
+        raise ValueError(f"{config.dataset} not accepted (check spelling)")
 
-    for key, value in vars(params).items():
-        print(f"{key} = {value}, Type: {type(value)}")
+    # Print configuration variables
+    print(f"Running experiment: {config.experiment_name}")
+    for attr, value in vars(config).items():
+        if not attr.startswith("__"):
+            print(f"{attr} = {value}")
 
-    train_ds, test_ds = prepare_dataset(params)
+    # Prepare dataset
+    train_ds, test_ds = prepare_dataset()
 
-    EXPERIMENT_NAME = params.experiment_name
-    print(f'Running {EXPERIMENT_NAME}')
+    # Initialize the model
+    model = deepJSCC()
 
-    
-    model = deepJSCC(
-        input_size = params.image_width,
-        has_gdn=params.has_gdn,
-        num_symbols=params.data_size,
-        snrdB=params.train_snrdb,
-        channel=params.channel_type
-    )
-    #display_image(train_ds)
+    # Display a few example images from the training dataset
+    # display_image(train_ds)
 
+    # PSNR as a custom metric
     def psnr(y_true, y_pred):
         return tf.image.psnr(y_true, y_pred, max_val=1)
-  
+
+    # Compile the model
     model.compile(
         loss='mse',
-        optimizer=tf.keras.optimizers.legacy.Adam(
-            learning_rate=1e-4
-        ),
-        metrics=[
-            psnr
-        ]
+        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=1e-4),
+        metrics=[psnr]
     )
 
-    model.build(input_shape=(None, params.image_width, params.image_height, params.image_channels))
+    # Build the model and display a summary
+    model.build(input_shape=(None, 64, 64, config.image_channels))
     model.summary()
 
+    # Save model visualization
     plot_model(model, to_file='example_images/model_plot.png', show_shapes=True, show_layer_names=True)
-    
-    if args.ckpt is not None:
+
+    # Load checkpoint if provided
+    if args.ckpt:
         model.load_weights(args.ckpt)
 
-    save_ckpt = [
-      tf.keras.callbacks.ModelCheckpoint(
-          filepath=f"./ckpt/{EXPERIMENT_NAME}_" + "{epoch}",
-          save_best_only=True,
-          monitor="val_loss",
-          save_weights_only=True,
-          options=tf.train.CheckpointOptions(
-              experimental_io_device=None, experimental_enable_async_checkpoint=True
-          )
-      )
-  ]
+    # Define callbacks
+    checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=f"./ckpt/{config.experiment_name}_{{epoch}}",
+        save_best_only=True,
+        monitor="val_loss",
+        save_weights_only=True,
+        options=tf.train.CheckpointOptions(
+            experimental_io_device=None, experimental_enable_async_checkpoint=True
+        )
+    )
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{config.experiment_name}')
 
-    tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{EXPERIMENT_NAME}')
+    # Train the model
     history = model.fit(
         train_ds,
-        initial_epoch=params.initial_epoch,
-        epochs=params.epochs,
-        callbacks=[tensorboard, save_ckpt],
+        initial_epoch=config.initial_epoch,
+        epochs=config.epochs,
+        callbacks=[tensorboard_callback, checkpoint_callback],
         validation_data=test_ds,
     )
 
-    model.save_weights('models/saved_models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
-    #model.save('models/' + f"{EXPERIMENT_NAME}_" + f"{params.epochs}" + '.h5')
+    # Save the model weights
+    model.save_weights(f'models/saved_models/{config.experiment_name}_{config.epochs}.h5')
+
 
 def check_gpu():
     physical_devices = tf.config.experimental.list_physical_devices('GPU')
     print("Num GPUs Available: ", len(physical_devices))
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+    if physical_devices:
+        tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 
-def prepare_dataset(params):
+def prepare_dataset():
+    """
+    Prepares the dataset using the paths and configurations defined in config.py.
+    """
     AUTO = tf.data.experimental.AUTOTUNE
-    test_ds = dataset_generator(params.test_dir, params)
-    train_ds = dataset_generator(params.train_dir, params).cache()
+    test_ds = dataset_generator(config.test_dir, config)
+    train_ds = dataset_generator(config.train_dir, config).cache()
 
-    class_names = test_ds.class_names
-    print(class_names) 
+    # Display class names
+    print(test_ds.class_names)
 
-    for images, labels in train_ds.take(1):
-        print(images.shape)  # (batch_size, img_height, img_width, 3)
-        print(labels.shape)  # (batch_size,)
-
-    normalize = tf.keras.layers.Rescaling(1./255)
+    # Data augmentation and normalization
     augment_layer = tf.keras.Sequential([
-        tf.keras.layers.Rescaling(1./255),
+        tf.keras.layers.Rescaling(1. / 255),
         tf.keras.layers.RandomFlip("horizontal"),
     ])
 
+    normalize = tf.keras.layers.Rescaling(1. / 255)
+
     def normalize_and_augment(image, training):
-        image = augment_layer(image, training=training)
-        return image
-    
-    #shuffle, augment and discard labels to replace them with the image data for autoenc
+        return augment_layer(image, training=training)
+
+    # Shuffle, augment, and map datasets
     train_ds = (
-    train_ds.shuffle(50000, reshuffle_each_iteration=True)
-            .map(lambda x, y: (normalize_and_augment(x, training=True), y), num_parallel_calls=AUTO)
-            .map(lambda x, _: (x, x))
-            .prefetch(AUTO)
+        train_ds.shuffle(50000, reshuffle_each_iteration=True)
+        .map(lambda x, y: (normalize_and_augment(x, training=True), x), num_parallel_calls=AUTO)
+        .prefetch(AUTO)
     )
 
     test_ds = (
-    test_ds.map(lambda x, y: (normalize(x), y))
-            .map(lambda x, _: (x, x))
-            .cache()
-            .prefetch(AUTO)
+        test_ds.map(lambda x, y: (normalize(x), x))
+        .cache()
+        .prefetch(AUTO)
     )
 
     return train_ds, test_ds
 
-def read_config(config_file, config_name):
-    config = configparser.ConfigParser()
-    config.read(config_file)
-    
-    if config_name in config:
-        params = type('Params', (object,), {})()
-        for key, value in config[config_name].items():
-            # Attempt to convert the value to an integer
-            try:
-                int_value = int(value)
-                setattr(params, key, int_value)
-            except ValueError:
-                setattr(params, key, value)
-        return params
-    else:
-        raise ValueError(f"Configuration '{config_name}' not found in {config_file}")
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n",'--config_name', type=str, default='default',help='use config within config file'),
-    parser.add_argument("-c",'--config_file', type=str, default='config/config.txt',help='config file location'),
-    parser.add_argument("-p",'--ckpt', type=str,help='checkpoint file')
-
+    parser.add_argument("-p", '--ckpt', type=str, help='Checkpoint file')
     return parser.parse_args()
 
+
 def display_image(dataset):
-    #denormalise and save example image to disk
-    
-    i=0
-    for images, labels in dataset.take(1):  # Take one batch from the dataset
+    """
+    Save example images from the dataset to disk.
+    """
+    for images, _ in dataset.take(1):  # Take one batch from the dataset
         for i in range(9):
             example_image = images[i] * 255.0
             example_image = example_image.numpy().astype(np.uint8)  # Convert to numpy array
             img = Image.fromarray(example_image)  # Create an Image object
-            filename = 'example_images/example_image_' + str(i) + '.png' 
+            filename = f'example_images/example_image_{i}.png'
             img.save(filename)  # Save the image to disk
-            
-    
 
 
 if __name__ == "__main__":

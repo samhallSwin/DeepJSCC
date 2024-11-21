@@ -1,14 +1,14 @@
 import tensorflow as tf
 import tensorflow_compression as tfc
 from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
+from config import config
 #from models.vitblock import VitBlock
 
 class deepJSCC(tf.keras.Model):
-    def __init__(self, has_gdn=True,
-                 num_symbols=512, snrdB=25, channel='AWGN', input_size=32):
+    def __init__(self):
         
         super().__init__()
-        if has_gdn:
+        if config.has_gdn:
             gdn_func=tfc.layers.GDN()
             igdn_func=tfc.layers.GDN(inverse=True)
         else:
@@ -25,12 +25,12 @@ class deepJSCC(tf.keras.Model):
             block_types[:3],
             filters[:3],
             num_blocks[:3],
-            num_symbols,
-            input_size=input_size,
+            config.num_symbols,
+            input_size=config.input_size,
             gdn_func=gdn_func
         )
 
-        self.channel = AWGNChannel(snrdB)
+        self.channel = AWGNChannel(config.snrdB)
 
         '''if channel == 'Rayleigh':
             self.channel = RayleighChannel(snrdB)
@@ -45,7 +45,7 @@ class deepJSCC(tf.keras.Model):
             block_types[3:],
             filters[3:],
             num_blocks[3:],
-            input_size=input_size,
+            input_size=config.input_size,
             gdn_func=igdn_func
         )
     
@@ -138,19 +138,19 @@ class Decoder(tf.keras.layers.Layer):
             ] 
         elif input_size==32:  
             self.layers = [
-                # 8 x 8 input
-                build_blocks(0, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
-                # upsampled to 16 x 16
-                tf.keras.layers.Resizing(16, 16),
-                build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, gdn_func=gdn_func),
-                # upsampled to 32 x 32
-                tf.keras.layers.Resizing(32, 32),
-                build_blocks(2, block_types, num_blocks, filters, 32, kernel_size=9, gdn_func=gdn_func),
-                # to image
-                tf.keras.layers.Conv2D(
-                    filters=3,
-                    kernel_size=1,
-                    activation='sigmoid'
+            # 8 x 8 input
+            build_blocks(0, block_types, num_blocks, filters, 8, kernel_size=5, gdn_func=gdn_func),
+            # upsampled to 16 x 16
+            tf.keras.layers.Resizing(16, 16),
+            build_blocks(1, block_types, num_blocks, filters, 16, kernel_size=5, gdn_func=gdn_func),
+            # upsampled to 32 x 32
+            tf.keras.layers.Resizing(32, 32),
+            build_blocks(2, block_types, num_blocks, filters, 32, kernel_size=9, gdn_func=gdn_func),
+            # to image
+            tf.keras.layers.Conv2D(
+                filters=3,
+                kernel_size=1,
+                activation='sigmoid'
                 )
             ]
         else:
