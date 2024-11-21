@@ -1,11 +1,10 @@
 import tensorflow as tf
 import tensorflow_compression as tfc
 from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
-from config import config
 #from models.vitblock import VitBlock
 
 class deepJSCC(tf.keras.Model):
-    def __init__(self):
+    def __init__(self, config):
         
         super().__init__()
         if config.has_gdn:

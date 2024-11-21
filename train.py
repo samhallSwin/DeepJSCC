@@ -22,23 +22,15 @@ def main():
     print(config.architecture)
     print(config.arcChoice)
 
-    # Configure dataset paths and dimensions based on dataset type
-    if config.dataset == 'cifar10':
-        print('Using CIFAR10 dataset')
-        config.train_dir = './dataset/CIFAR10/train/'
-        config.test_dir = './dataset/CIFAR10/test/'
-        config.image_width = 32
-        config.image_height = 32
-        config.image_channels = 3
-    elif config.dataset == 'eurosatrgb':
-        print('Using Eurosat RGB dataset')
-        config.train_dir = './dataset/EuroSAT_RGB_split/train/'
-        config.test_dir = './dataset/EuroSAT_RGB_split/test/'
-        config.image_width = 64
-        config.image_height = 64
-        config.image_channels = 3
-    else:
-        raise ValueError(f"{config.dataset} not accepted (check spelling)")
+    # Access dataset configuration from config
+    dataset_config = config.current_dataset_config
+
+    print(f"Using {dataset_config['name']} dataset")
+    config.train_dir = dataset_config['train_dir']
+    config.test_dir = dataset_config['test_dir']
+    config.image_width = dataset_config['image_width']
+    config.image_height = dataset_config['image_height']
+    config.image_channels = dataset_config['image_channels']
 
     # Print configuration variables
     print(f"Running experiment: {config.experiment_name}")
@@ -50,7 +42,7 @@ def main():
     train_ds, test_ds = prepare_dataset()
 
     # Initialize the model
-    model = deepJSCC()
+    model = deepJSCC(config)
 
     # Display a few example images from the training dataset
     # display_image(train_ds)

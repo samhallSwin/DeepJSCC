@@ -1,20 +1,36 @@
-
 experiment_name = "eurosat_RGB_test"
 checkpoint_filepath = "checkpoint.ckpt"
 
 mode = "test"
-dataset = "cifar10" #Options are eurosatrgb, cifar10
+dataset = "eurosatrgb"  # Options are eurosatrgb, cifar10
 
 has_gdn = True
-snrdB =15
+snrdB = 15
 num_symbols = 512
-input_size = 32
-# Configurations for different architectures. Select one by setting arcChoice to desired arc_name
-#new arcs can be added as required by following the format
+input_size = 64
 
+# Dataset configurations
+datasets_config = {
+    "cifar10": {
+        "name": "CIFAR10",
+        "train_dir": "./dataset/CIFAR10/train/",
+        "test_dir": "./dataset/CIFAR10/test/",
+        "image_width": 32,
+        "image_height": 32,
+        "image_channels": 3,
+    },
+    "eurosatrgb": {
+        "name": "EuroSAT RGB",
+        "train_dir": "./dataset/EuroSAT_RGB_split/train/",
+        "test_dir": "./dataset/EuroSAT_RGB_split/test/",
+        "image_width": 64,
+        "image_height": 64,
+        "image_channels": 3,
+    },
+}
 
+# Selected architecture based on arcChoice
 arcChoice = 'nieve_4_layers'
-
 architectures = {
     'nieve_4_layers': {
         'has_gdn': True,
@@ -44,8 +60,6 @@ architectures = {
             ]
         },
     },
-
-
     'Original': {
         'has_gdn': False,
         'snrdB': 20,
@@ -68,16 +82,15 @@ architectures = {
             ]
         },
     },
-    # Add more architectures as needed
 }
 
-
-# Selected architecture based on arcChoice
 architecture = architectures[arcChoice]
 
-
-#Training params
-batch_size = 64
+# Training parameters
+batch_size = 32
 epochs = 1
 data_size = 512
 initial_epoch = 0
+
+# Access dataset configuration
+current_dataset_config = datasets_config[dataset]

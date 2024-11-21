@@ -1,15 +1,15 @@
 from tensorflow.keras.preprocessing import image_dataset_from_directory
 
 
-def dataset_generator(dir, params, mode=None, shuffle=True):
+def dataset_generator(dir, config, mode=None, shuffle=True):
     if mode:
         dataset = image_dataset_from_directory(
             directory=dir,
             label_mode='int',
             labels='inferred',
             color_mode='rgb',
-            batch_size=params.batch_size,
-            image_size=(params.image_width, params.image_height),
+            batch_size=config.batch_size,
+            image_size=(config.image_width, config.image_height),
             shuffle=shuffle,
             interpolation='bilinear',
             validation_split=0.1,
@@ -22,8 +22,8 @@ def dataset_generator(dir, params, mode=None, shuffle=True):
             label_mode='int',
             labels='inferred',
             color_mode='rgb',
-            batch_size=params.batch_size,
-            image_size=(params.image_width, params.image_height),
+            batch_size=config.batch_size,
+            image_size=(config.image_width, config.image_height),
             shuffle=shuffle,
             interpolation='bilinear'
         )
