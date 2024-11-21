@@ -1,13 +1,13 @@
 
-experiment_name = "eurosat_rgb_archtest" #effects file locations. Will overwrite previous with same name for the most part
+experiment_name = "New_CIFAR" #effects file locations. Will overwrite previous with same name for the most part
 workflow = "train" #train, loadAndTest
 checkpoint_filepath = "checkpoint.ckpt"
 
-modelFile = 'eurosat_rgb_1_epoch_1.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'New_CIFAR.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 1
+epochs = 15
 train_snrdB = 15
 data_size = 512
 initial_epoch = 0
@@ -68,7 +68,7 @@ def setArc():
         dec = decoder_config_neive_64
     else:
         print('architecture not found (check spelling)')
-        
+
     return enc, dec
 
 def setImageParamsFromDataset():
@@ -93,7 +93,7 @@ def setImageParamsFromDataset():
         test_dir = './dataset/OV-MNIST/testing/'
         image_width = 28
         image_height = 28
-        image_channels = 1
+        image_channels = 3
         print('eurosat_RGB dataset selected')
     else:
         print('No supported dataset - check spelling')

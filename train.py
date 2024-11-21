@@ -34,6 +34,8 @@ def main():
 
     train_ds, test_ds = prepare_dataset(config)
 
+    
+
     print(f'Running {config.experiment_name}')
 
     
@@ -131,6 +133,9 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
         ]
     )
 
+    # Latent space visualization
+    #analysis_tools.latent_vis(model, test_ds)
+
     output_dir = "example_images"
     num_images = 8
     os.makedirs(output_dir, exist_ok=True)
@@ -195,9 +200,23 @@ def prepare_dataset(config):
     class_names = test_ds.class_names
     print(class_names) 
 
+    print(f'Length of dataset = {len(train_ds)}')
     for images, labels in train_ds.take(1):
         print(images.shape)  # (batch_size, img_height, img_width, 3)
         print(labels.shape)  # (batch_size,)
+
+    #    train_to_pad = train_ds
+    #test_to_pad = test_ds
+
+    if config.image_height == 28:
+        train_ds = train_ds.map(pad_images)
+        test_ds = test_ds.map(pad_images)
+        config.image_width = 32
+        config.image_height = 32
+        for images, labels in train_ds.take(1):
+            print(images.shape)  # (batch_size, img_height, img_width, 3)
+            print(labels.shape)  # (batch_size,)
+    
 
     normalize = tf.keras.layers.Rescaling(1./255)
     augment_layer = tf.keras.Sequential([
@@ -225,6 +244,13 @@ def prepare_dataset(config):
     )
 
     return train_ds, test_ds
+
+# Add padding transformation
+def pad_images(images, labels):
+    # Pad the images to make them 32x32
+    images = tf.pad(images, [[0, 0], [2, 2], [2, 2], [0, 0]], "CONSTANT")
+    return images, labels
+
 
 
 def parse_args():

@@ -68,6 +68,12 @@ class deepJSCC(tf.keras.Model):
         x = self.decoder(x)
         return x
 
+    #Slows down everything and doesn't seem useful..
+    #def get_latent_features(self, x):
+    #    """
+    #    Passes the input through the encoder and returns latent features.
+    #    """
+    #    return self.encoder(x)
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, config, num_symbols, gdn_func=None, input_size=32, **kwargs):
@@ -82,15 +88,14 @@ class Encoder(tf.keras.layers.Layer):
                 stride=layer_cfg["stride"],
                 block_type=layer_cfg["block_type"],
                 gdn_func=gdn_func
-            ))
-            # Update current spatial size after each layer
-            current_size = (current_size + 2 * layer_cfg.get("padding", 0) - layer_cfg["kernel_size"]) // layer_cfg["stride"] + 1
-            print(f'Current size = {current_size}')
-            
+                )
+            )
+
+
         # Final layer to map to constellation
         self.layers.append(
             tf.keras.layers.Conv2D(
-                filters=num_symbols // (input_size // (2 ** len(config))) ** 2 * 2,
+                filters=num_symbols // (input_size // (2 ** len(config))) ** 2 * 2,      
                 kernel_size=1
             )
         )
@@ -108,12 +113,15 @@ class Decoder(tf.keras.layers.Layer):
     def __init__(self, config, gdn_func=None, input_size=32, **kwargs):
         super().__init__()
         self.layers = []
+        current_size = input_size // 4  # Assuming a 2x2 downsampling factor
 
         for idx, layer_cfg in enumerate(config):
             if "upsample_size" in layer_cfg and layer_cfg["upsample_size"] is not None:
                 self.layers.append(tf.keras.layers.Resizing(
                     layer_cfg["upsample_size"], layer_cfg["upsample_size"]
                 ))
+                current_size = layer_cfg["upsample_size"]
+
             self.layers.append(build_block(
                 filters=layer_cfg["filters"],
                 kernel_size=layer_cfg["kernel_size"],
