@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 
+
 # Function to save a single image
 def save_image(image, filepath):
     img = Image.fromarray(image)
@@ -78,7 +79,6 @@ def visualize_and_save_images(original_images, processed_images, original_sizes,
 
     plt.tight_layout()
     plt.savefig(output_path, bbox_inches="tight")
-    plt.show()
 
 
 
