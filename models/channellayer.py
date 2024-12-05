@@ -130,3 +130,15 @@ class RicianChannel(tf.keras.layers.Layer):
         yhat = tf.math.sqrt(1 / (1+k)) * h * x + tf.math.sqrt(k / (1+k)) * x + n
 
         return yhat
+    
+def compute_bandwidth_ratio(input_size, num_symbols):
+    """
+    Computes the bandwidth ratio for the autoencoder.
+    :param input_size: Tuple of (H, W, C), representing height, width, and channels of input.
+    :param num_symbols: Number of symbols produced by the encoder.
+    :return: Bandwidth ratio.
+    """
+    H, W, C = input_size
+    B_input = H * W * C  # Input bandwidth
+    B_output = num_symbols * 2  # Output bandwidth (I and Q components)
+    return B_output / B_input

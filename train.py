@@ -11,11 +11,14 @@ import configparser
 from config import config
 from utils import image_proc
 from utils import analysis_tools
+from analysis import attmaps
 from skimage.metrics import structural_similarity as ssim
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras.utils import plot_model
+from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 
 from models.model import deepJSCC
+import tests
 
 from utils.datasets import dataset_generator
 
@@ -42,7 +45,7 @@ def main():
     model = deepJSCC(
         input_size = config.image_width,
         has_gdn=config.has_gdn,
-        num_symbols=config.data_size,
+        num_symbols=config.num_symbols,
         snrdB=config.train_snrdB,
         encoder_config=enc,
         decoder_config=dec,
@@ -59,33 +62,13 @@ def main():
     #model.save('models/' + f"{config.experiment_name}_" + f"{config.epochs}" + '.h5')
 
 def train_model(model, config, train_ds, test_ds, args):
-    if config.loss_func == 'mse': #mse,  
-        model.compile(
-            loss='mse',
-            optimizer=tf.keras.optimizers.legacy.Adam(
-                learning_rate=1e-4
-            ),
-            metrics=[
-                psnr,
-                ssim_metric
-            ]
-        )
-    elif config.loss_func == 'perceptual_loss':
-         model.compile(
-            loss=perceptual_loss,
-            optimizer=tf.keras.optimizers.legacy.Adam(
-                learning_rate=1e-4
-            ),
-            metrics=[
-                psnr,
-                ssim_metric
-            ]
-        ) 
+
+    compile_model(model)
 
     model.build(input_shape=(None, config.image_width, config.image_height, config.image_channels))
     model.summary()
 
-    #plot_model(model, to_file='example_images/model_plot.png', show_shapes=True, show_layer_names=True)
+    #plot_model(model, to_file='outputs/example_images/model_plot.png', show_shapes=True, show_layer_names=True)
     
     if args.ckpt is not None:
         model.load_weights(args.ckpt)
@@ -122,37 +105,66 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
 
     model.summary()
 
-    model.compile(
-        loss='mse',
-        optimizer=tf.keras.optimizers.legacy.Adam(
-            learning_rate=1e-4
-        ),
-        metrics=[
-            psnr,
-            ssim_metric
-        ]
-    )
+    compile_model(model)
 
-    # Latent space visualization
-    #analysis_tools.latent_vis(model, test_ds)
 
-    output_dir = "example_images"
-    num_images = 8
-    os.makedirs(output_dir, exist_ok=True)
+    if "validate_model" in config.TESTS_TO_RUN:
+        tests.validate_model(model, test_ds)
+    
+    if "save_latent" in config.TESTS_TO_RUN:
+        tests.save_latent(model, test_ds, config)
 
-    original_images, processed_images, original_sizes, processed_sizes = image_proc.process_and_save_images(train_ds, model, output_dir, num_images=num_images)
-    output_path = "example_images/visualization.png"
-    image_proc.visualize_and_save_images(original_images, processed_images, original_sizes, processed_sizes, output_path, num_images=num_images)
-    print(f'8 random images captured to /{output_dir}')
+    if "compare_to_BPG_LDPC" in config.TESTS_TO_RUN:
+        tests.compare_to_BPG_LDPC(model, test_ds, train_ds, config)
 
-    print('Running inference time analysis')
-    input_shape = (64, 64, 3)  # Example input shape
-    avg_time = analysis_tools.evaluate_inference_time(model, input_shape)
-    print(f"Average Inference Time: {avg_time:.2f} ms")
+    if "compare_to_JPEG2000" in config.TESTS_TO_RUN:
+        tests.compare_to_JPEG2000(model, test_ds, train_ds, config)
 
-    input_shape = (64, 64, 3)  # Example input shape
-    avg_time_tf = analysis_tools.evaluate_inference_time_tf(model, input_shape)
-    print(f"Average Inference Time (TF Graph): {avg_time_tf:.2f} ms")
+    if "time_analysis" in config.TESTS_TO_RUN:
+        tests.time_analysis(model)
+
+def compile_model(model):
+    if config.loss_func == 'mse':  # mse
+        model.compile(
+            loss='mse',
+            optimizer=tf.keras.optimizers.legacy.Adam(
+                learning_rate=1e-4
+            ),
+            metrics=[
+                psnr,
+                ssim_metric
+            ]
+        )
+    elif config.loss_func == 'perceptual_loss':
+        # Initialize VGG16 model
+        vgg = VGG16(include_top=False, weights='imagenet', input_shape=(224, 224, 3))
+        feature_extractor = tf.keras.Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv3').output)
+        feature_extractor.trainable = False  # Ensure the feature extractor is not trainable
+
+        # Use a closure to create a perceptual loss function with the feature extractor
+        def perceptual_loss_with_extractor(y_true, y_pred):
+            """
+            Calculate perceptual loss by comparing features extracted from a VGG16 model.
+            """
+            # Resize input to match VGG input size
+            y_true_resized = tf.image.resize(y_true, (224, 224))
+            y_pred_resized = tf.image.resize(y_pred, (224, 224))
+
+            # Extract features and compute mean squared error
+            true_features = feature_extractor(y_true_resized)
+            pred_features = feature_extractor(y_pred_resized)
+            return tf.reduce_mean(tf.square(true_features - pred_features))
+
+        model.compile(
+            loss=perceptual_loss_with_extractor,
+            optimizer=tf.keras.optimizers.legacy.Adam(
+                learning_rate=1e-4
+            ),
+            metrics=[
+                psnr,
+                ssim_metric
+            ]
+        )
 
 def psnr(y_true, y_pred):
         return tf.image.psnr(y_true, y_pred, max_val=1)
@@ -178,11 +190,6 @@ def perceptual_loss(y_true, y_pred):
     """
     Calculate perceptual loss by comparing features extracted from a VGG16 model.
     """
-    # Load a pre-trained VGG16 model
-    vgg = VGG16(include_top=False, weights='imagenet', input_shape=(224, 224, 3))
-    feature_extractor = tf.keras.Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv3').output)
-    feature_extractor.trainable = False  # Ensure the feature extractor is not trainable
-
     # Resize input to match VGG input size
     y_true_resized = tf.image.resize(y_true, (224, 224))
     y_pred_resized = tf.image.resize(y_pred, (224, 224))
@@ -200,9 +207,9 @@ def prepare_dataset(config):
     class_names = test_ds.class_names
     print(class_names) 
 
-    print(f'Length of dataset = {len(train_ds)}')
+    print(f'Length of dataset (batches) = {len(train_ds)}')
     for images, labels in train_ds.take(1):
-        print(images.shape)  # (batch_size, img_height, img_width, 3)
+        print(f'Shape of dataset{images.shape}')  # (batch_size, img_height, img_width, 3)
         print(labels.shape)  # (batch_size,)
 
     #    train_to_pad = train_ds
@@ -270,7 +277,7 @@ def display_image(dataset):
             example_image = images[i] * 255.0
             example_image = example_image.numpy().astype(np.uint8)  # Convert to numpy array
             img = Image.fromarray(example_image)  # Create an Image object
-            filename = 'example_images/example_image_' + str(i) + '.png' 
+            filename = 'outputs/example_images/example_image_' + str(i) + '.png' 
             img.save(filename)  # Save the image to disk
             
 

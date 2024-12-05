@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_compression as tfc
+import numpy as np
 from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 #from models.vitblock import VitBlock
 
@@ -67,6 +68,22 @@ class deepJSCC(tf.keras.Model):
         x = self.channel(x)
         x = self.decoder(x)
         return x
+
+    def save_latent_representation(self, input_image, file_path):
+        """
+        Passes the input through the encoder and saves the latent features to a file.
+        """
+        latent = self.encoder(input_image)
+        np.save(file_path, latent.numpy())  # Save latent features to file
+
+    def load_and_decode(self, file_path):
+        """
+        Loads latent features from a file and decodes them.
+        """
+        latent = np.load(file_path)  # Load latent features from file
+        latent_tensor = tf.convert_to_tensor(latent, dtype=tf.float32)  # Convert to tensor
+        output_image = self.decoder(latent_tensor)
+        return output_image
 
     #Slows down everything and doesn't seem useful..
     #def get_latent_features(self, x):
@@ -170,4 +187,22 @@ def build_block(filters, kernel_size, stride, block_type, gdn_func=None):
     x.add(tf.keras.layers.PReLU(shared_axes=[1, 2]))
     return x
 
+def simulate_channel(latent_path, output_path, channel, snr_db):
+    """
+    Simulates a channel on the latent data saved in a file.
+    """
+    latent = np.load(latent_path)
+    latent_tensor = tf.convert_to_tensor(latent, dtype=tf.float32)
 
+    # Apply the channel model
+    if channel == 'AWGN':
+        simulated_latent = AWGNChannel(snr_db)(latent_tensor)
+    elif channel == 'Rayleigh':
+        simulated_latent = RayleighChannel(snr_db)(latent_tensor)
+    elif channel == 'Rician':
+        simulated_latent = RicianChannel(snr_db, k=2)(latent_tensor)
+    else:
+        raise ValueError("Unsupported channel type.")
+
+    # Save the simulated latent features
+    np.save(output_path, simulated_latent.numpy())

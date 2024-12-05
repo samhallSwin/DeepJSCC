@@ -3,6 +3,9 @@ dataset/
 example_images/
 logs/
 models/saved_models/
+analysis/
+outputs/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
