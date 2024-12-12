@@ -94,7 +94,11 @@ def train_model(model, config, train_ds, test_ds, args):
         validation_data=test_ds,
     )
 
-    model.save_weights('models/saved_models/' + f"{config.experiment_name}_" + f"{config.epochs}" + '.h5')
+    save_dir = 'models/saved_models/'
+    os.makedirs(save_dir, exist_ok=True)
+    save_dir = os.path.join(save_dir, f"{config.experiment_name}_{config.epochs}.h5")
+    model.save_weights(save_dir)
+    print(f'Model saved to {save_dir}')
 
 def load_and_analyse(model, config, train_ds, test_ds, args):
     input_shape = (config.image_width,config.image_height,config.image_channels)
