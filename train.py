@@ -26,6 +26,9 @@ def main():
     args = parse_args() #TODO read other config file 
     check_gpu()
 
+    strategy = tf.distribute.MirroredStrategy()
+    print(f"Number of devices: {strategy.num_replicas_in_sync}")
+
     #Set dataset relevant params in config.[param]
     config.setImageParamsFromDataset()
     enc, dec = config.setArc()
@@ -41,25 +44,24 @@ def main():
 
     print(f'Running {config.experiment_name}')
 
+    with strategy.scope():
+        model = deepJSCC(
+            input_size = config.image_width,
+            has_gdn=config.has_gdn,
+            num_symbols=config.num_symbols,
+            snrdB=config.train_snrdB,
+            encoder_config=enc,
+            decoder_config=dec,
+            channel=config.channel_type
+        )
+        
+        if config.workflow == "train": 
+            train_model(model, config, train_ds, test_ds, args)
+        elif config.workflow == "loadAndTest": 
+            load_and_analyse(model, config, train_ds, test_ds, args)
+        else:
+            print('No valid workflow detected (Check spelling)')
     
-    model = deepJSCC(
-        input_size = config.image_width,
-        has_gdn=config.has_gdn,
-        num_symbols=config.num_symbols,
-        snrdB=config.train_snrdB,
-        encoder_config=enc,
-        decoder_config=dec,
-        channel=config.channel_type
-    )
-    
-    if config.workflow == "train": 
-        train_model(model, config, train_ds, test_ds, args)
-    elif config.workflow == "loadAndTest": 
-        load_and_analyse(model, config, train_ds, test_ds, args)
-    else:
-        print('No valid workflow detected (Check spelling)')
-    
-    #model.save('models/' + f"{config.experiment_name}_" + f"{config.epochs}" + '.h5')
 
 def train_model(model, config, train_ds, test_ds, args):
 
@@ -187,6 +189,15 @@ def check_gpu():
         print(f"Num GPUs Available: {len(physical_devices)}")
     else:
         print("No GPU available. Running on CPU.")
+
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("Memory growth set successfully for all GPUs.")
+        except RuntimeError as e:
+            print(f"Error setting memory growth: {e}")
 
 
 #Replace 'mse' in model.compile with this

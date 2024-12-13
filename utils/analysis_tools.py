@@ -659,7 +659,6 @@ def run_single_image_BPGplusLDPC(image, config, bw_ratio, snrs, mcs, save_path='
     else:
         max_bytes = h * w * c * bw_ratio * math.log2(1 + 10 ** (snrs/10)) / 8
         
-    
     # BPG encode the image
     src_bits = bpgencoder.encode(image, max_bytes)
 

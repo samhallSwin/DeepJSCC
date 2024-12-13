@@ -111,6 +111,7 @@ def process_and_save_images(dataset, model, output_dir, config, bw_ratio, snrs, 
     ssim_comparison = []
 
     images_saved = 0
+    max_bytes = 0
 
     for batch in dataset:
         images, _ = batch  # Ignore labels
@@ -136,7 +137,7 @@ def process_and_save_images(dataset, model, output_dir, config, bw_ratio, snrs, 
 
                 # Process the image through the specified compression pipeline
                 if comparison_format == "BPG":
-                    comparison_image, _ = run_single_image_BPGplusLDPC(
+                    comparison_image, max_bytes = run_single_image_BPGplusLDPC(
                         (img * 255).astype(np.uint8), config, bw_ratio, snrs, mcs, save_path=output_dir, LDPCon=LDPCon
                     )
                 elif comparison_format == "JPEG2000":
@@ -170,6 +171,7 @@ def process_and_save_images(dataset, model, output_dir, config, bw_ratio, snrs, 
 
                 images_saved += 1
             else:
+                print(f'Max bytes = {max_bytes}')
                 return (original_images, processed_images, comparison_images,
                         psnr_model_processed, psnr_comparison,
                         ssim_model_processed, ssim_comparison)
