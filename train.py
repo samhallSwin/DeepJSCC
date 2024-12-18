@@ -129,6 +129,15 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
     if "time_analysis" in config.TESTS_TO_RUN:
         tests.time_analysis(model)
 
+    if "process_All_SNR" in config.TESTS_TO_RUN:
+        tests.process_All_SNR(model, test_ds, train_ds, config)
+
+    if "process_images_through_channel" in config.TESTS_TO_RUN:
+        tests.process_images_through_channel(model, test_ds, config, num_images=8, snr_range=(-10, 20))
+    
+    if "process_random_image_at_snrs" in config.TESTS_TO_RUN:
+        tests.process_random_image_at_snrs(model, test_ds, num_images=5, snr_range=(-20, 20), step=5, save_dir="outputs/channel_state_est/")
+
 def compile_model(model):
     if config.loss_func == 'mse':  # mse
         model.compile(
