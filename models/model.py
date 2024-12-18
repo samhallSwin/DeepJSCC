@@ -7,7 +7,7 @@ from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 class deepJSCC(tf.keras.Model):
     def __init__(self, has_gdn=True,
                  num_symbols=512, snrdB=25, channel='AWGN', input_size=32,
-                 encoder_config=None, decoder_config=None, debug_file=None):
+                 encoder_config=None, set_channel_filters=False, channel_filters=64, decoder_config=None, debug_file=None):
         """
         :param encoder_config: List of dictionaries for encoder layers configuration.
         :param decoder_config: List of dictionaries for decoder layers configuration.
@@ -39,6 +39,8 @@ class deepJSCC(tf.keras.Model):
             config=encoder_config,
             num_symbols=num_symbols,
             input_size=input_size,
+            set_channel_filters=set_channel_filters,
+            channel_filters=channel_filters,
             gdn_func="forward" if has_gdn else "None",
             debug=self.debug,
             debug_file=debug_file
@@ -118,7 +120,7 @@ class deepJSCC(tf.keras.Model):
     #    return self.encoder(x)
 
 class Encoder(tf.keras.layers.Layer):
-    def __init__(self, config, num_symbols, gdn_func=None, input_size=32, debug=False, debug_file=None, **kwargs):
+    def __init__(self, config, num_symbols, gdn_func=None, input_size=32, set_channel_filters=False, channel_filters=64, debug=False, debug_file=None, **kwargs):
         super().__init__()
         self.layers = []
         self.debug = debug
@@ -141,9 +143,8 @@ class Encoder(tf.keras.layers.Layer):
         if self.debug: #Hacky way of getting this layer into the visualisation tool
             self.log_debug(f"Building Encoder Layer output, Config: {{'filters': {num_symbols // (input_size // (2 ** len(config))) ** 2 * 2}, 'kernel_size': 1, 'stride': 1, 'block_type': 'C'}}, GDN: None")
 
-        if config.set_channel_filters:
-            channel_filters = config.channel_filters
-        else:
+        #Calculate if not being set otherwise
+        if not set_channel_filters:
             channel_filters = num_symbols // (input_size // (2 ** len(config))) ** 2 * 2
 
         # Final layer to map to constellation

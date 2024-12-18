@@ -49,12 +49,15 @@ def main():
 
     print(f'Running {config.experiment_name}')
 
+
     with strategy.scope():
         model = deepJSCC(
             input_size = config.image_width,
             has_gdn=config.has_gdn,
             num_symbols=config.num_symbols,
             snrdB=config.train_snrdB,
+            set_channel_filters = config.set_channel_filters,
+            channel_filters=config.channel_filters,
             encoder_config=enc,
             decoder_config=dec,
             channel=config.channel_type,
