@@ -53,7 +53,7 @@ class RayleighChannel(tf.keras.layers.Layer):
 class AWGNChannel(tf.keras.layers.Layer):
     def __init__(self, snrdB=None):
         super().__init__()
-        self.snr = 10 ** (snrdB / 10) # in dB
+        self.set_snr(snrdB)
     
 
     def call(self, x):
@@ -80,6 +80,8 @@ class AWGNChannel(tf.keras.layers.Layer):
         y = x + n
         return y
     
+    def set_snr(self, snrdB):
+        self.snr = 10 ** (snrdB / 10)  # Convert dB to linear scale
 
     def get_config(self):
         config = super().get_config()

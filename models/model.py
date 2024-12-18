@@ -182,7 +182,9 @@ def build_block(filters, kernel_size, stride, block_type, gdn_func=None):
     ))
 
     if gdn_func:
-        x.add(gdn_func)
+        x.add(tfc.layers.GDN())
+    else:
+        x.add(tf.keras.layers.Lambda(lambda x: x))  # No GDN fallback
 
     x.add(tf.keras.layers.PReLU(shared_axes=[1, 2]))
     return x

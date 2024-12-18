@@ -1,14 +1,14 @@
 
-experiment_name = "Eurosat_128_filt_1024_data_size" #effects file locations. Will overwrite previous with same name for the most part
-workflow = "loadAndTest" #train, loadAndTest
+experiment_name = "orig_enc_test" #effects file locations. Will overwrite previous with same name for the most part
+workflow = "train" #train, loadAndTest
 #checkpoint_filepath = "checkpoint.ckpt"
 
-modelFile = 'Eurosat_rgb_26_11_10.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'Eurosat_test_OzStar_20.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 2
-train_snrdB = -30
+epochs = 20
+train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
 
@@ -26,13 +26,20 @@ LDPCon = True
 bw_ratio = 1 / 6
 mcs = (3072, 6144, 2)
 
-#add or remove tests (in tests.py)
+#For processing for channel state est testing
+snr_range=(-10, 15)
+
+#add or remove tests (in tests.py) 
+# WARNING: Tests should work independantly but have not been properly tested running sequentially
 TESTS_TO_RUN = [
     #"validate_model",
     #"time_analysis",
     #"compare_to_BPG_LDPC",
     #"compare_to_JPEG2000",
-    'save_latent',
+    #'process_All_SNR',
+    'process_random_image_at_snrs',
+    #'process_images_through_channel',
+    #'save_latent',
 ]
 
 #Must match entry in setImageParamsFromDataset()
@@ -42,7 +49,7 @@ dataset = "eurosatrgb" #eurosatrgb, CIFAR10, OV_MNIST
 
 #A list of mdoel configs that can be selected by arc_choice. Must match image dimensions
 
-arc_choice = 'neive_64'# neive_64, original, reduced_filters_64
+arc_choice = 'Filter_decrease'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
 
 #Original config from paper
 #input image 32x32x3
@@ -76,6 +83,38 @@ decoder_config_neive_64 =  [
 
 ]
 
+#Sliming filters progressively
+#input image 64x64x3
+encoder_config_Filter_decrease = [
+    {"filters": 256, "kernel_size": 9, "stride": 2, "block_type": "C"},
+    {"filters": 128, "kernel_size": 9, "stride": 2, "block_type": "C"},
+    {"filters": 64, "kernel_size": 5, "stride": 1, "block_type": "C"},
+    {"filters": 32, "kernel_size": 5, "stride": 1, "block_type": "C"},
+]
+
+decoder_config_Filter_decrease =  [
+    {"filters": 32, "kernel_size": 5, "stride": 1, "block_type": "C", "upsample_size": 16},
+    {"filters": 64, "kernel_size": 5, "stride": 1, "block_type": "C", "upsample_size": 32},
+    {"filters": 128, "kernel_size": 9, "stride": 1, "block_type": "C", "upsample_size": 64},
+    {"filters": 256, "kernel_size": 9, "stride": 1, "block_type": "C", "upsample_size": None},
+
+]
+
+#Original but for 64x64
+#input image 64x64x3
+encoder_config_original_64 = [
+    {"filters": 256, "kernel_size": 9, "stride": 2, "block_type": "C"},
+    {"filters": 256, "kernel_size": 5, "stride": 2, "block_type": "C"},
+    {"filters": 256, "kernel_size": 5, "stride": 1, "block_type": "C"},
+]
+
+decoder_config_original_64  = [
+    {"filters": 256, "kernel_size": 5, "stride": 1, "block_type": "C", "upsample_size": 16},
+    {"filters": 256, "kernel_size": 5, "stride": 1, "block_type": "C", "upsample_size": 32},
+    {"filters": 256, "kernel_size": 9, "stride": 1, "block_type": "C", "upsample_size": 64},
+
+]
+
 #First attempt for eurosat data
 #input image 64x64x3
 encoder_reduced_filters_64 = [
@@ -104,6 +143,12 @@ def setArc():
     elif arc_choice == 'reduced_filters_64':
         enc = encoder_reduced_filters_64
         dec = decoder_reduced_filters_64
+    elif arc_choice == 'Filter_decrease':
+        enc = encoder_config_Filter_decrease
+        dec = decoder_config_Filter_decrease
+    elif arc_choice == 'original_64':
+        enc = encoder_config_original_64
+        dec = decoder_config_original_64
     else:
         print('architecture not found (check spelling)')
 

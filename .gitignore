@@ -3,6 +3,7 @@ dataset/
 example_images/
 logs/
 models/saved_models/
+models/channelState_models/
 analysis/
 outputs/
 
