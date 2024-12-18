@@ -1,9 +1,9 @@
 
-experiment_name = "orig_enc_test" #effects file locations. Will overwrite previous with same name for the most part
+experiment_name = "Decrease_channel_filt" #effects file locations. Will overwrite previous with same name for the most part
 workflow = "train" #train, loadAndTest
-#checkpoint_filepath = "checkpoint.ckpt"
+checkpoint_filepath = ""
 
-modelFile = 'Eurosat_test_OzStar_20.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'decreasing_filters_test_20.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
@@ -11,6 +11,9 @@ epochs = 20
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
+
+set_channel_filters = True #Should the number of params be set by channel_filters (True) or calculated? 
+channel_filters = 32
 
 #Architecture params
 has_gdn = True
@@ -32,9 +35,9 @@ snr_range=(-10, 15)
 #add or remove tests (in tests.py) 
 # WARNING: Tests should work independantly but have not been properly tested running sequentially
 TESTS_TO_RUN = [
-    #"validate_model",
+    "validate_model",
     #"time_analysis",
-    #"compare_to_BPG_LDPC",
+    "compare_to_BPG_LDPC",
     #"compare_to_JPEG2000",
     #'process_All_SNR',
     'process_random_image_at_snrs',
@@ -44,8 +47,6 @@ TESTS_TO_RUN = [
 
 #Must match entry in setImageParamsFromDataset()
 dataset = "eurosatrgb" #eurosatrgb, CIFAR10, OV_MNIST
-
-
 
 #A list of mdoel configs that can be selected by arc_choice. Must match image dimensions
 

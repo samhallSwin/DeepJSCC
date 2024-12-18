@@ -5,17 +5,12 @@ os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
 import tensorflow as tf
 from PIL import Image
 import numpy as np
-import matplotlib.pyplot as plt
-import argparse
-import configparser
+from config import configOverride
 from config import config
-from utils import image_proc
-from utils import analysis_tools
 #from analysis import attmaps
 from skimage.metrics import structural_similarity as ssim
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras.utils import plot_model
-from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 
 from models.model import deepJSCC
 import tests
@@ -23,7 +18,13 @@ import tests
 from utils.datasets import dataset_generator
 
 def main():
-    args = parse_args() #TODO read other config file 
+    args = configOverride.parse_args() #override config with args
+
+    configOverride.override_config_with_args(config, args)
+
+    settings_file = os.path.join('logs', f"{config.experiment_name}_settings.txt")
+    save_config_to_file(config, settings_file)
+
     check_gpu()
 
     strategy = tf.distribute.MirroredStrategy()
@@ -40,7 +41,11 @@ def main():
 
     train_ds, test_ds = prepare_dataset(config)
 
-    
+    #Stores the model shape and attributes
+    model_shape_file = f"logs/{config.experiment_name}_modelShape.txt"
+    if os.path.exists(model_shape_file):
+        os.remove(model_shape_file)
+        print(f"Deleted existing debug log file: {model_shape_file}")
 
     print(f'Running {config.experiment_name}')
 
@@ -52,7 +57,8 @@ def main():
             snrdB=config.train_snrdB,
             encoder_config=enc,
             decoder_config=dec,
-            channel=config.channel_type
+            channel=config.channel_type,
+            debug_file=model_shape_file
         )
         
         if config.workflow == "train": 
@@ -72,8 +78,8 @@ def train_model(model, config, train_ds, test_ds, args):
 
     #plot_model(model, to_file='outputs/example_images/model_plot.png', show_shapes=True, show_layer_names=True)
     
-    if args.ckpt is not None:
-        model.load_weights(args.ckpt)
+    if args.checkpoint_filepath is not None:
+        model.load_weights(args.checkpoint_filepath)
 
     save_ckpt = [
       tf.keras.callbacks.ModelCheckpoint(
@@ -284,13 +290,23 @@ def pad_images(images, labels):
 
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-n",'--config_name', type=str, default='default',help='use config within config file'),
-    parser.add_argument("-c",'--config_file', type=str, default='config/config.txt',help='config file location'),
-    parser.add_argument("-p",'--ckpt', type=str,help='checkpoint file')
-
-    return parser.parse_args()
+def save_config_to_file(config, filename):
+    """
+    Save user-defined config settings to a file, excluding built-ins and special attributes.
+    """
+    os.makedirs(os.path.dirname(filename), exist_ok=True)  # Ensure the directory exists
+    
+    with open(filename, 'w') as f:
+        f.write("Experiment Configuration Settings\n")
+        f.write("-" * 40 + "\n")
+        
+        # Filter out built-in attributes and functions
+        for attr in dir(config):
+            if not attr.startswith("__") and not callable(getattr(config, attr)):
+                value = getattr(config, attr)
+                f.write(f"{attr} = {value}\n")
+    
+    print(f"Configuration settings saved to {filename}")
 
 def display_image(dataset):
     #denormalise and save example image to disk
