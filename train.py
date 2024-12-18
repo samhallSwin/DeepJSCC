@@ -11,7 +11,7 @@ import configparser
 from config import config
 from utils import image_proc
 from utils import analysis_tools
-from analysis import attmaps
+#from analysis import attmaps
 from skimage.metrics import structural_similarity as ssim
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras.utils import plot_model
