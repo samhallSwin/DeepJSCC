@@ -6,6 +6,7 @@ models/saved_models/
 models/channelState_models/
 analysis/
 outputs/
+temp_don't commit/
 
 
 # Byte-compiled / optimized / DLL files

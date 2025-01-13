@@ -427,3 +427,57 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
 
     print(f'8 random images captured to /{output_dir}')
     return True
+
+#a collection of random little debugging tests. No code quality. May be broken
+def hacky_tests(model, test_ds, num_images=5, save_dir="outputs/sobel_testing/", threshold=False):
+    #visualise Soble
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Extract all images from the test dataset into a list
+    all_images = []
+    for images, _ in test_ds:
+        all_images.extend(images.numpy())  # Convert Tensors to NumPy arrays
+
+    # Select random images
+    selected_images = random.sample(all_images, num_images)
+
+    # Process and save Sobel edges for each image
+    for idx, image in enumerate(selected_images):
+        # Ensure the image has a batch dimension
+        image_tensor = tf.expand_dims(image, axis=0)
+
+        # Compute Sobel edges
+        sobel_edges = tf.image.sobel_edges(image_tensor)  # Shape: (batch, height, width, channels, 2)
+        grad_x = sobel_edges[..., 0]
+        grad_y = sobel_edges[..., 1]
+        edge_magnitude = tf.sqrt(tf.square(grad_x) + tf.square(grad_y))  # Compute edge magnitude
+
+        # Apply threshold if specified
+        if threshold is not None:
+            edge_magnitude = tf.where(edge_magnitude > threshold, edge_magnitude, 0.0)
+
+        # Remove batch and channel dimensions for visualization
+        edge_magnitude = tf.reduce_mean(edge_magnitude, axis=-1).numpy()  # Average across color channels
+        edge_magnitude = edge_magnitude[0]  # Remove batch dimension
+
+        # Save visualization
+        plt.figure(figsize=(8, 4))
+
+        # Original image
+        plt.subplot(1, 2, 1)
+        plt.imshow(image, cmap='gray')  # Assuming single image
+        plt.title('Original Image')
+        plt.axis('off')
+
+        # Edge map
+        plt.subplot(1, 2, 2)
+        plt.imshow(edge_magnitude, cmap='viridis')
+        plt.title('Sobel Edge Map' + (f' (Threshold={threshold})' if threshold else ''))
+        plt.axis('off')
+
+        plt.tight_layout()
+        output_path = os.path.join(save_dir, f"sobel_edge_image_{idx}.png")
+        plt.savefig(output_path)
+        plt.close()
+        print(f"Saved Sobel edge visualization to {output_path}")

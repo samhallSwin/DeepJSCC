@@ -9,10 +9,10 @@ from config import configOverride
 from config import config
 #from analysis import attmaps
 from skimage.metrics import structural_similarity as ssim
-from tensorflow.keras.applications import VGG16
 from tensorflow.keras.utils import plot_model
 
 from models.model import deepJSCC
+from models.loss_functions import sobel_edge_loss, combined_loss, perceptual_loss_with_extractor, init_perceptual_loss, gradient_loss, combined_loss_verbose, LossWeightScheduler
 import tests
 
 from utils.datasets import dataset_generator
@@ -97,13 +97,27 @@ def train_model(model, config, train_ds, test_ds, args):
   ]
 
     tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{config.experiment_name}')
-    history = model.fit(
-        train_ds,
-        initial_epoch=config.initial_epoch,
-        epochs=config.epochs,
-        callbacks=[tensorboard, save_ckpt],
-        validation_data=test_ds,
-    )
+    
+    #if we're changing loss function weighting between epochs we need an extra callback  
+    if config.loss_func == 'combined_schedule':
+        dynamic_weights = [tf.Variable(1.0), tf.Variable(0.0)] 
+        loss_weight_scheduler = LossWeightScheduler(dynamic_weights, config.loss_schedule)
+
+        history = model.fit(
+            train_ds,
+            initial_epoch=config.initial_epoch,
+            epochs=config.epochs,
+            callbacks=[tensorboard, save_ckpt, loss_weight_scheduler],
+            validation_data=test_ds,
+        )
+    else:
+         history = model.fit(
+            train_ds,
+            initial_epoch=config.initial_epoch,
+            epochs=config.epochs,
+            callbacks=[tensorboard, save_ckpt],
+            validation_data=test_ds,
+        )       
 
     save_dir = 'models/saved_models/'
     os.makedirs(save_dir, exist_ok=True)
@@ -147,48 +161,73 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
     if "process_random_image_at_snrs" in config.TESTS_TO_RUN:
         tests.process_random_image_at_snrs(model, test_ds, num_images=5, snr_range=(-20, 20), step=5, save_dir="outputs/channel_state_est/")
 
+    if "hacky_tests" in config.TESTS_TO_RUN:
+        tests.hacky_tests(model, test_ds)
+
+
 def compile_model(model):
-    if config.loss_func == 'mse':  # mse
-        model.compile(
-            loss='mse',
-            optimizer=tf.keras.optimizers.legacy.Adam(
-                learning_rate=1e-4
-            ),
-            metrics=[
-                psnr,
-                ssim_metric
-            ]
-        )
-    elif config.loss_func == 'perceptual_loss':
-        # Initialize VGG16 model
-        vgg = VGG16(include_top=False, weights='imagenet', input_shape=(224, 224, 3))
-        feature_extractor = tf.keras.Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv3').output)
-        feature_extractor.trainable = False  # Ensure the feature extractor is not trainable
+    #Primary purpose is to run model.compile at the bottom of the function, the rest is here to set up the loss function we want
 
-        # Use a closure to create a perceptual loss function with the feature extractor
-        def perceptual_loss_with_extractor(y_true, y_pred):
-            """
-            Calculate perceptual loss by comparing features extracted from a VGG16 model.
-            """
-            # Resize input to match VGG input size
-            y_true_resized = tf.image.resize(y_true, (224, 224))
-            y_pred_resized = tf.image.resize(y_pred, (224, 224))
+    print(f'Compiling model with {config.loss_func} loss function')
 
-            # Extract features and compute mean squared error
-            true_features = feature_extractor(y_true_resized)
-            pred_features = feature_extractor(y_pred_resized)
-            return tf.reduce_mean(tf.square(true_features - pred_features))
+    if config.loss_func == 'mse':  # Mean Squared Error
+        loss = 'mse'
+    elif config.loss_func == 'perceptual_loss':  # Perceptual loss using VGG16
 
-        model.compile(
-            loss=perceptual_loss_with_extractor,
-            optimizer=tf.keras.optimizers.legacy.Adam(
-                learning_rate=1e-4
-            ),
-            metrics=[
-                psnr,
-                ssim_metric
-            ]
-        )
+        init_perceptual_loss()
+        loss = perceptual_loss_with_extractor
+
+    elif config.loss_func == 'sobel_edge_loss':  # Sobel edge loss
+        loss = sobel_edge_loss
+    elif config.loss_func == 'gradient_loss':  # gradient edge loss
+        loss = gradient_loss
+    elif (config.loss_func == 'combined') or (config.loss_func == 'combined_loss_verbose'):  # Combine losses with weights
+        loss_functions = []
+        weights = []
+        
+        if 'mse' in config.combined_loss_weights:
+            loss_functions.append(tf.keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.NONE))
+            weights.append(config.combined_loss_weights['mse'])
+        
+        if 'perceptual_loss' in config.combined_loss_weights:
+            init_perceptual_loss()
+            loss = perceptual_loss_with_extractor
+            
+            loss_functions.append(perceptual_loss_with_extractor)
+            weights.append(config.combined_loss_weights['perceptual_loss'])
+        
+        if 'sobel_edge_loss' in config.combined_loss_weights:
+            loss_functions.append(sobel_edge_loss)
+            weights.append(config.combined_loss_weights['sobel_edge_loss'])
+        
+        if 'gradient_loss' in config.combined_loss_weights:
+            loss_functions.append(gradient_loss)
+            weights.append(config.combined_loss_weights['gradient_loss'])
+        
+        if (config.loss_func == 'combined'): 
+            loss = combined_loss(loss_functions, weights)
+        else:
+            loss = combined_loss_verbose(loss_functions, weights)
+
+    elif config.loss_func == 'combined_schedule': 
+        dynamic_weights = [tf.Variable(1.0), tf.Variable(0.0)] 
+        loss_functions = [
+            tf.keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.NONE),
+            sobel_edge_loss
+        ]
+        loss = combined_loss(loss_functions, dynamic_weights)
+
+    else:
+        raise ValueError(f"Unsupported loss function: {config.loss_func}")
+    
+    model.compile(
+        loss=loss,
+        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=1e-4),
+        metrics=[
+            psnr,
+            ssim_metric
+        ]
+    )
 
 def psnr(y_true, y_pred):
         return tf.image.psnr(y_true, y_pred, max_val=1)
@@ -218,19 +257,19 @@ def check_gpu():
             print(f"Error setting memory growth: {e}")
 
 
-#Replace 'mse' in model.compile with this
-def perceptual_loss(y_true, y_pred):
-    """
-    Calculate perceptual loss by comparing features extracted from a VGG16 model.
-    """
-    # Resize input to match VGG input size
-    y_true_resized = tf.image.resize(y_true, (224, 224))
-    y_pred_resized = tf.image.resize(y_pred, (224, 224))
-
-    # Extract features and compute mean squared error
-    true_features = feature_extractor(y_true_resized)
-    pred_features = feature_extractor(y_pred_resized)
-    return tf.reduce_mean(tf.square(true_features - pred_features))
+##Replace 'mse' in model.compile with this
+#def perceptual_loss(y_true, y_pred):
+#    """
+#    Calculate perceptual loss by comparing features extracted from a VGG16 model.
+#    """
+#    # Resize input to match VGG input size
+#    y_true_resized = tf.image.resize(y_true, (224, 224))
+#    y_pred_resized = tf.image.resize(y_pred, (224, 224))
+#
+#    # Extract features and compute mean squared error
+#    true_features = feature_extractor(y_true_resized)
+#    pred_features = feature_extractor(y_pred_resized)
+#    return tf.reduce_mean(tf.square(true_features - pred_features))
 
 def prepare_dataset(config):
     AUTO = tf.data.experimental.AUTOTUNE

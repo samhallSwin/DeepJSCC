@@ -1,13 +1,13 @@
 
-experiment_name = "Decrease_channel_filt" #effects file locations. Will overwrite previous with same name for the most part
+experiment_name = "Scheduled_loss_testing" #effects file locations. Will overwrite previous with same name for the most part
 workflow = "train" #train, loadAndTest
 checkpoint_filepath = ""
 
-modelFile = 'decreasing_filters_test_20.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'Custom_loss_testing_mse_ref_1.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 20
+epochs = 1
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
@@ -18,8 +18,22 @@ channel_filters = 32
 #Architecture params
 has_gdn = True
 channel_type = "AWGN" #Rayleigh, AWGN, Rician, None
-loss_func = 'mse' #mse, perceptual_loss
+loss_func = 'combined_schedule' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule
 
+#If loss_func=combined, set relative amounts here. Comment out unsused elements (ie. don't set them to zero)
+combined_loss_weights = {
+    'mse': 1.0,
+    #'sobel_edge_loss': 0.1,
+    #'gradient_loss': 0.5,
+}
+
+#if loss_func=combined_schedule, this sets the relative loss weights in the form epoch: [loss1 weight, loss2 weight]
+#Currently only works for 2 loss functions
+loss_schedule = {
+        0: [1.0, 0.0],
+        10: [0.5, 0.5],  
+        15: [0.2, 0.8],  
+    }
 
 #Trad compression test features for comparison
 #bw_ratio = [1/12, 1/6, 1/4, 1/3, 1/2]
@@ -35,14 +49,15 @@ snr_range=(-10, 15)
 #add or remove tests (in tests.py) 
 # WARNING: Tests should work independantly but have not been properly tested running sequentially
 TESTS_TO_RUN = [
-    "validate_model",
+    #"validate_model",
     #"time_analysis",
     "compare_to_BPG_LDPC",
     #"compare_to_JPEG2000",
     #'process_All_SNR',
-    'process_random_image_at_snrs',
+    #'process_random_image_at_snrs',
     #'process_images_through_channel',
     #'save_latent',
+    #'hacky_tests',
 ]
 
 #Must match entry in setImageParamsFromDataset()
@@ -50,7 +65,7 @@ dataset = "eurosatrgb" #eurosatrgb, CIFAR10, OV_MNIST
 
 #A list of mdoel configs that can be selected by arc_choice. Must match image dimensions
 
-arc_choice = 'Filter_decrease'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
+arc_choice = 'neive_64'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
 
 #Original config from paper
 #input image 32x32x3
