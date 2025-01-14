@@ -482,7 +482,7 @@ def create_plots_from_latent(latent, channel_output, output_folder):
 
     # Compute SSIM for the noise analysis
     if latent_image.shape == channel_image.shape:
-        ssim_index = ssim(latent_image, channel_image, data_range=channel_image.max() - channel_image.min())
+        ssim_index = ssim(latent_image, channel_image, data_range=channel_image.max() - channel_image.min(),channel_axis=-1)
         print(f"Structural Similarity Index (SSIM): {ssim_index}")
     else:
         print(f"Cannot compute SSIM due to shape mismatch: {latent_image.shape} vs {channel_image.shape}")
