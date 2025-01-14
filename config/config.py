@@ -1,13 +1,13 @@
 
-experiment_name = "SSIM_loss" #effects file locations. Will overwrite previous with same name for the most part
-workflow = "loadAndTest" #train, loadAndTest
+experiment_name = "full_sched_test" #effects file locations. Will overwrite previous with same name for the most part
+workflow = "train" #train, loadAndTest
 checkpoint_filepath = ""
 
 modelFile = 'SSIM_loss_10.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 10
+epochs = 20
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
@@ -18,7 +18,7 @@ channel_filters = 32
 #Architecture params
 has_gdn = True
 channel_type = "AWGN" #Rayleigh, AWGN, Rician, None
-loss_func = 'ssim_loss' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule, ssim_loss
+loss_func = 'combined_schedule' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule, ssim_loss
 
 #If loss_func=combined, set relative amounts here. Comment out unsused elements (ie. don't set them to zero)
 combined_loss_weights = {
