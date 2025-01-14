@@ -1,4 +1,4 @@
-#This function includes the custom loss functions.
+#This function includes the custom loss functions for experimentation
 # To add a new function, define here, add entry in config under loss_func, and entry under compile_model() function in train.py 
 
 import tensorflow as tf
@@ -17,6 +17,21 @@ def sobel_edge_loss(y_true, y_pred):
     y_true_edges = sobel_edges(y_true)
     y_pred_edges = sobel_edges(y_pred)
     return tf.reduce_mean(tf.abs(y_true_edges - y_pred_edges))
+
+def ssim_loss(y_true, y_pred, max_val=1.0):
+    """
+    Computes the SSIM loss between y_true and y_pred.
+    
+    Args:
+        y_true: Ground truth images (batch of images).
+        y_pred: Predicted/reconstructed images (batch of images).
+        max_val: The dynamic range of pixel values (default is 1.0 for normalized inputs).
+        
+    Returns:
+        A scalar SSIM loss value.
+    """
+    ssim_value = tf.image.ssim(y_true, y_pred, max_val=max_val)
+    return 1.0 - tf.reduce_mean(ssim_value)
 
 def gradient_loss(y_true, y_pred):
 

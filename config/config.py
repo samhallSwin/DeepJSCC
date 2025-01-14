@@ -1,13 +1,13 @@
 
-experiment_name = "Scheduled_loss_testing" #effects file locations. Will overwrite previous with same name for the most part
-workflow = "train" #train, loadAndTest
+experiment_name = "SSIM_loss" #effects file locations. Will overwrite previous with same name for the most part
+workflow = "loadAndTest" #train, loadAndTest
 checkpoint_filepath = ""
 
-modelFile = 'Custom_loss_testing_mse_ref_1.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'SSIM_loss_10.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 1
+epochs = 10
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
@@ -18,7 +18,7 @@ channel_filters = 32
 #Architecture params
 has_gdn = True
 channel_type = "AWGN" #Rayleigh, AWGN, Rician, None
-loss_func = 'combined_schedule' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule
+loss_func = 'ssim_loss' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule, ssim_loss
 
 #If loss_func=combined, set relative amounts here. Comment out unsused elements (ie. don't set them to zero)
 combined_loss_weights = {
@@ -65,7 +65,7 @@ dataset = "eurosatrgb" #eurosatrgb, CIFAR10, OV_MNIST
 
 #A list of mdoel configs that can be selected by arc_choice. Must match image dimensions
 
-arc_choice = 'neive_64'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
+arc_choice = 'reduced_filters_64'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
 
 #Original config from paper
 #input image 32x32x3

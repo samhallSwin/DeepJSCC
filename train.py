@@ -12,7 +12,7 @@ from skimage.metrics import structural_similarity as ssim
 from tensorflow.keras.utils import plot_model
 
 from models.model import deepJSCC
-from models.loss_functions import sobel_edge_loss, combined_loss, perceptual_loss_with_extractor, init_perceptual_loss, gradient_loss, combined_loss_verbose, LossWeightScheduler
+from models.loss_functions import sobel_edge_loss, combined_loss, perceptual_loss_with_extractor, init_perceptual_loss, gradient_loss, combined_loss_verbose, LossWeightScheduler, ssim_loss
 import tests
 
 from utils.datasets import dataset_generator
@@ -177,9 +177,11 @@ def compile_model(model):
         init_perceptual_loss()
         loss = perceptual_loss_with_extractor
 
-    elif config.loss_func == 'sobel_edge_loss':  # Sobel edge loss
+    elif config.loss_func == 'sobel_edge_loss':  
         loss = sobel_edge_loss
-    elif config.loss_func == 'gradient_loss':  # gradient edge loss
+    elif config.loss_func == 'ssim_loss':  
+        loss = ssim_loss
+    elif config.loss_func == 'gradient_loss':  
         loss = gradient_loss
     elif (config.loss_func == 'combined') or (config.loss_func == 'combined_loss_verbose'):  # Combine losses with weights
         loss_functions = []
@@ -199,6 +201,10 @@ def compile_model(model):
         if 'sobel_edge_loss' in config.combined_loss_weights:
             loss_functions.append(sobel_edge_loss)
             weights.append(config.combined_loss_weights['sobel_edge_loss'])
+        
+        if 'ssim_loss' in config.combined_loss_weights:
+            loss_functions.append(ssim_loss)
+            weights.append(config.combined_loss_weights['ssim_loss'])
         
         if 'gradient_loss' in config.combined_loss_weights:
             loss_functions.append(gradient_loss)
