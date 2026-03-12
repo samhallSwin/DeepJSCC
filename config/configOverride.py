@@ -21,6 +21,9 @@ def parse_args():
     parser.add_argument("-d", '--dataset', type=str, choices=['CIFAR10', 'eurosatrgb', 'OV_MNIST'], help='Dataset name')
     parser.add_argument("-a", '--arc_choice', type=str, help='Architecture choice')
     parser.add_argument("--snr_range", type=str, help='SNR range for tests (comma-separated, e.g., "-10,15")')
+    parser.add_argument("--snr_eval_step", type=int, help='Step size for SNR sweep tests')
+    parser.add_argument("--num_snr_eval_images", type=int, help='Number of test images to use in the SNR sweep')
+    parser.add_argument("--snr_sweep_output_dir", type=str, help='Output directory for SNR sweep artifacts')
     parser.add_argument("--LDPCon", action='store_true', help='Enable LDPC comparison')
     parser.add_argument("--bw_ratio", type=float, help='Bandwidth ratio for traditional compression test')
     parser.add_argument("--mcs", type=str, help='Modulation and coding scheme (comma-separated, e.g., "3072,6144,2")')
@@ -50,6 +53,9 @@ def override_config_with_args(config, args):
     if args.snr_range:
         snr_min, snr_max = map(int, args.snr_range.split(","))
         config.snr_range = (snr_min, snr_max)
+    if args.snr_eval_step: config.snr_eval_step = args.snr_eval_step
+    if args.num_snr_eval_images: config.num_snr_eval_images = args.num_snr_eval_images
+    if args.snr_sweep_output_dir: config.snr_sweep_output_dir = args.snr_sweep_output_dir
     if args.LDPCon: config.LDPCon = True
     if args.bw_ratio: config.bw_ratio = args.bw_ratio
     if args.mcs:

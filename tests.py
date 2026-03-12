@@ -13,6 +13,103 @@ from PIL import Image
 import pandas as pd
 import random
 
+import csv
+from datetime import datetime
+from utils.clip_metrics import CLIPHandle, clip_cosine_similarities
+
+
+def _collect_eval_images(dataset, num_images):
+    selected_images = []
+
+    for images, _ in dataset:
+        images_np = images.numpy()
+        for img in images_np:
+            selected_images.append(img)
+            if len(selected_images) >= num_images:
+                return selected_images
+
+    return selected_images
+
+
+def _evaluate_model_at_snr(model, images, snr):
+    model.channel.set_snr(snr)
+
+    psnr_scores = []
+    ssim_scores = []
+    reconstructed_images = []
+
+    for img in images:
+        img_tensor = tf.expand_dims(img, axis=0)
+        processed_image = tf.squeeze(model(img_tensor, training=False)).numpy()
+        reconstructed_images.append(processed_image)
+
+        original_u8 = (img * 255).astype(np.uint8)
+        processed_u8 = (np.clip(processed_image, 0, 1) * 255).astype(np.uint8)
+
+        psnr_scores.append(analysis_tools.calculate_psnr(original_u8, processed_u8))
+        ssim_scores.append(analysis_tools.calculate_ssim(original_u8, processed_u8))
+
+    return reconstructed_images, psnr_scores, ssim_scores
+
+
+def _evaluate_bpg_baseline_at_snr(images, config, snr, output_dir, use_ldpc):
+    baseline_images = []
+    psnr_scores = []
+    ssim_scores = []
+
+    baseline_name = "bpg_ldpc" if use_ldpc else "bpg"
+    baseline_output_dir = os.path.join(output_dir, f"temp_{baseline_name}_snr_{snr}")
+    os.makedirs(baseline_output_dir, exist_ok=True)
+
+    for idx, img in enumerate(images):
+        original_u8 = (img * 255).astype(np.uint8)
+        comparison_image, _ = analysis_tools.run_single_image_BPGplusLDPC(
+            original_u8,
+            config,
+            config.bw_ratio,
+            snr,
+            config.mcs,
+            save_path=baseline_output_dir,
+            LDPCon=use_ldpc,
+        )
+        baseline_images.append(comparison_image)
+        psnr_scores.append(analysis_tools.calculate_psnr(original_u8, comparison_image))
+        ssim_scores.append(analysis_tools.calculate_ssim(original_u8, comparison_image))
+
+        if idx == 0:
+            sample_path = os.path.join(output_dir, f"{baseline_name}_sample_snr_{snr}.png")
+            Image.fromarray(comparison_image).save(sample_path)
+
+    return baseline_images, psnr_scores, ssim_scores
+
+
+def _write_snr_sweep_plot(results_df, output_path):
+    plt.figure(figsize=(10, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(results_df["snr_db"], results_df["model_psnr_mean"], marker="o", label="DeepJSCC")
+    plt.plot(results_df["snr_db"], results_df["bpg_ldpc_psnr_mean"], marker="o", label="BPG+LDPC")
+    plt.plot(results_df["snr_db"], results_df["bpg_psnr_mean"], marker="o", label="BPG")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("PSNR")
+    plt.title("PSNR vs SNR")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(results_df["snr_db"], results_df["model_ssim_mean"], marker="o", label="DeepJSCC")
+    plt.plot(results_df["snr_db"], results_df["bpg_ldpc_ssim_mean"], marker="o", label="BPG+LDPC")
+    plt.plot(results_df["snr_db"], results_df["bpg_ssim_mean"], marker="o", label="BPG")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("SSIM")
+    plt.title("SSIM vs SNR")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_path, bbox_inches="tight")
+    plt.close()
+
 def validate_model(model, test_ds):
     print("Validating the model...")
     loss = model.evaluate(test_ds)
@@ -428,6 +525,93 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
     print(f'8 random images captured to /{output_dir}')
     return True
 
+
+def compare_across_snr_range(model, test_ds, config):
+    print("Running SNR sweep: DeepJSCC vs BPG+LDPC vs BPG...")
+
+    output_dir = getattr(config, "snr_sweep_output_dir", "outputs/snr_sweep")
+    os.makedirs(output_dir, exist_ok=True)
+
+    snr_min, snr_max = config.snr_range
+    snr_step = getattr(config, "snr_eval_step", 1)
+    num_eval_images = getattr(config, "num_snr_eval_images", 8)
+    snr_values = list(range(snr_min, snr_max + 1, snr_step))
+
+    eval_images = _collect_eval_images(test_ds, num_eval_images)
+    if not eval_images:
+        raise RuntimeError("No evaluation images found in the test dataset.")
+
+    summary_rows = []
+    per_image_rows = []
+
+    first_original_path = os.path.join(output_dir, "original_sample.png")
+    Image.fromarray((eval_images[0] * 255).astype(np.uint8)).save(first_original_path)
+
+    for snr in snr_values:
+        print(f"Evaluating SNR={snr}dB on {len(eval_images)} images")
+
+        model_images, model_psnr, model_ssim = _evaluate_model_at_snr(model, eval_images, snr)
+        bpg_ldpc_images, bpg_ldpc_psnr, bpg_ldpc_ssim = _evaluate_bpg_baseline_at_snr(
+            eval_images, config, snr, output_dir, use_ldpc=True
+        )
+        bpg_images, bpg_psnr, bpg_ssim = _evaluate_bpg_baseline_at_snr(
+            eval_images, config, snr, output_dir, use_ldpc=False
+        )
+
+        model_sample_path = os.path.join(output_dir, f"model_sample_snr_{snr}.png")
+        Image.fromarray((np.clip(model_images[0], 0, 1) * 255).astype(np.uint8)).save(model_sample_path)
+
+        summary_rows.append({
+            "snr_db": snr,
+            "num_images": len(eval_images),
+            "model_psnr_mean": float(np.mean(model_psnr)),
+            "model_psnr_std": float(np.std(model_psnr)),
+            "model_ssim_mean": float(np.mean(model_ssim)),
+            "model_ssim_std": float(np.std(model_ssim)),
+            "bpg_ldpc_psnr_mean": float(np.mean(bpg_ldpc_psnr)),
+            "bpg_ldpc_psnr_std": float(np.std(bpg_ldpc_psnr)),
+            "bpg_ldpc_ssim_mean": float(np.mean(bpg_ldpc_ssim)),
+            "bpg_ldpc_ssim_std": float(np.std(bpg_ldpc_ssim)),
+            "bpg_psnr_mean": float(np.mean(bpg_psnr)),
+            "bpg_psnr_std": float(np.std(bpg_psnr)),
+            "bpg_ssim_mean": float(np.mean(bpg_ssim)),
+            "bpg_ssim_std": float(np.std(bpg_ssim)),
+        })
+
+        for idx in range(len(eval_images)):
+            per_image_rows.append({
+                "snr_db": snr,
+                "image_index": idx,
+                "model_psnr": float(model_psnr[idx]),
+                "model_ssim": float(model_ssim[idx]),
+                "bpg_ldpc_psnr": float(bpg_ldpc_psnr[idx]),
+                "bpg_ldpc_ssim": float(bpg_ldpc_ssim[idx]),
+                "bpg_psnr": float(bpg_psnr[idx]),
+                "bpg_ssim": float(bpg_ssim[idx]),
+            })
+
+    summary_df = pd.DataFrame(summary_rows)
+    per_image_df = pd.DataFrame(per_image_rows)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    summary_csv = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_summary_{stamp}.csv")
+    per_image_csv = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_per_image_{stamp}.csv")
+    plot_path = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_{stamp}.png")
+
+    summary_df.to_csv(summary_csv, index=False)
+    per_image_df.to_csv(per_image_csv, index=False)
+    _write_snr_sweep_plot(summary_df, plot_path)
+
+    print(f"Saved SNR sweep summary to {summary_csv}")
+    print(f"Saved per-image SNR sweep data to {per_image_csv}")
+    print(f"Saved SNR sweep plot to {plot_path}")
+
+    return {
+        "summary_csv": summary_csv,
+        "per_image_csv": per_image_csv,
+        "plot_path": plot_path,
+    }
+
 #a collection of random little debugging tests. No code quality. May be broken
 def hacky_tests(model, test_ds, num_images=5, save_dir="outputs/sobel_testing/", threshold=False):
     #visualise Soble
@@ -481,3 +665,207 @@ def hacky_tests(model, test_ds, num_images=5, save_dir="outputs/sobel_testing/",
         plt.savefig(output_path)
         plt.close()
         print(f"Saved Sobel edge visualization to {output_path}")
+
+
+# tests.py (add near your other tests)
+import numpy as np
+import tensorflow as tf
+from utils.clip_metrics import CLIPHandle, clip_image_similarity, clip_zero_shot_label
+
+def compare_semantic_CLIP(model, test_ds, config, num_images=64, do_zeroshot=False):
+    """
+    Compute CLIP image-image cosine similarity between originals and reconstructions.
+    Optionally, compute zero-shot label agreement with CLIP if your dataset has class names.
+    """
+    print("Evaluating semantic fidelity with CLIP (image-image similarity)...")
+    handle = CLIPHandle(model_name=getattr(config, "clip_model_name", "ViT-B/32"))
+
+    sims = []
+    zs_agree = []
+    zs_details = []  # (orig_label, rec_label, agree, orig_conf, rec_conf)
+
+    images_seen = 0
+    # test_ds yields (image, label) with image in [0,1] thanks to your pipeline
+    for batch in test_ds:
+        imgs, labels = batch
+        imgs = imgs.numpy()
+
+        # forward through your model
+        preds = model(imgs, training=False).numpy()
+
+        for i in range(imgs.shape[0]):
+            if images_seen >= num_images:
+                break
+            orig = imgs[i]        # [0,1]
+            rec  = preds[i]       # [0,1]
+
+            sim = clip_image_similarity(orig, rec, handle)
+            sims.append(sim)
+
+            if do_zeroshot and hasattr(test_ds, "class_names"):
+                class_names = getattr(test_ds, "class_names", None)
+                if class_names:
+                    o_lbl, r_lbl, agree, o_conf, r_conf = clip_zero_shot_label(orig, rec, class_names, handle)
+                    zs_agree.append(1 if agree else 0)
+                    zs_details.append((o_lbl, r_lbl, agree, o_conf, r_conf))
+
+            images_seen += 1
+        if images_seen >= num_images:
+            break
+
+    sims = np.array(sims, dtype=np.float32)
+    mean_sim = float(sims.mean()) if len(sims) else float("nan")
+    std_sim  = float(sims.std()) if len(sims) else float("nan")
+    print(f"CLIP image-image cosine similarity: mean={mean_sim:.4f}  std={std_sim:.4f}  (1.0 is best)")
+
+    if do_zeroshot and len(zs_agree):
+        zs_agree = np.array(zs_agree, dtype=np.float32)
+        acc = float(zs_agree.mean())
+        print(f"Zero-shot label agreement (CLIP): {acc*100:.2f}%")
+    return {"mean_clip_sim": mean_sim, "std_clip_sim": std_sim, "zs_details": zs_details}
+
+def compare_semantic_CLIP_vs_BPG_LDPC(model, test_ds, config):
+    """
+    Compare semantic fidelity (CLIP cosine similarity) of:
+        - model reconstructions vs. originals
+        - BPG+LDPC reconstructions vs. originals
+    using the same images your PSNR/SSIM test uses.
+    """
+
+    num_images=config.num_semantic_eval_images
+    device=config.clip_device
+    clip_model_name=config.clip_model_name
+
+    print("Comparing semantic fidelity with CLIP: Model vs. BPG+LDPC ...")
+
+     # 1) Reuse your existing pipeline to get images & PSNR/SSIM (and save the images)
+    results = image_proc.process_and_save_images(
+        dataset=test_ds,
+        model=model,
+        output_dir="outputs/example_images/BPG_LDPC",
+        config=config,
+        bw_ratio=config.bw_ratio,
+        snrs=config.train_snrdB,
+        mcs=config.mcs,
+        comparison_format="BPG",
+        num_images=num_images,
+        LDPCon=getattr(config, "LDPCon", True),
+    )
+
+    (original_images, processed_images, bpg_ldpc_images,
+     psnr_model_processed, psnr_bpg_ldpc,
+     ssim_model_processed, ssim_bpg_ldpc) = results
+
+    # 2) Harmonize counts and types
+    N = min(len(original_images), len(processed_images), len(bpg_ldpc_images), num_images)
+    if N == 0:
+        raise RuntimeError("No images were produced by process_and_save_images; check dataset and num_images.")
+
+    original_images      = original_images[:N]                 # float [0,1]
+    processed_images     = processed_images[:N]                # float [0,1]
+    bpg_ldpc_images_u8   = bpg_ldpc_images[:N]                 # uint8
+    bpg_ldpc_images_f01  = [img.astype(np.float32) / 255.0 for img in bpg_ldpc_images_u8]
+
+    psnr_model_processed = psnr_model_processed[:N]
+    psnr_bpg_ldpc        = psnr_bpg_ldpc[:N]
+    ssim_model_processed = ssim_model_processed[:N]
+    ssim_bpg_ldpc        = ssim_bpg_ldpc[:N]
+
+    # 3) CLIP features & similarities
+    handle = CLIPHandle(
+        model_name=clip_model_name or getattr(config, "clip_model_name", "ViT-B/32"),
+        device=device or getattr(config, "clip_device", "cpu")
+    )
+    sims_model = clip_cosine_similarities(original_images,     processed_images,    handle, batch_size=32)
+    sims_bpg   = clip_cosine_similarities(original_images,     bpg_ldpc_images_f01, handle, batch_size=32)
+
+    mean_m, std_m = float(np.mean(sims_model)), float(np.std(sims_model))
+    mean_b, std_b = float(np.mean(sims_bpg)),   float(np.std(sims_bpg))
+    print(f"[CLIP cosine] Model: mean={mean_m:.4f} std={std_m:.4f}  |  BPG+LDPC: mean={mean_b:.4f} std={std_b:.4f}")
+
+    # Context: PSNR/SSIM
+    print(f"[PSNR]        Model: {np.mean(psnr_model_processed):.2f} dB  |  BPG+LDPC: {np.mean(psnr_bpg_ldpc):.2f} dB")
+    print(f"[SSIM]        Model: {np.mean(ssim_model_processed):.4f}   |  BPG+LDPC: {np.mean(ssim_bpg_ldpc):.4f}")
+
+    # 4) Visualization with CLIP overlays
+    os.makedirs("outputs/example_images/BPG_LDPC", exist_ok=True)
+    output_path = "outputs/example_images/BPG_LDPC/visualization_clip.png"
+    image_proc.visualize_and_save_images_with_comparison_and_clip(
+        original_images=original_images,
+        processed_images=processed_images,
+        comparison_images=bpg_ldpc_images_u8,   # uint8 is fine for imshow
+        psnr_model_processed=psnr_model_processed,
+        psnr_comparison=psnr_bpg_ldpc,
+        ssim_model_processed=ssim_model_processed,
+        ssim_comparison=ssim_bpg_ldpc,
+        clip_model_sims=sims_model,
+        clip_comparison_sims=sims_bpg,
+        output_path=output_path,
+        comparison_type="BPG+LDPC",
+        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
+    )
+    print(f"Saved visualization with CLIP overlays to {output_path}")
+
+    # 5) Save CSV with CLIP+PSNR+SSIM per image + aggregates
+    os.makedirs("logs", exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_csv = os.path.join("logs", f"{config.experiment_name}_clip_semantics_vs_bpg_{stamp}.csv")
+    with open(out_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["index",
+                    "clip_sim_model", "clip_sim_bpg_ldpc",
+                    "psnr_model", "psnr_bpg", "ssim_model", "ssim_bpg"])
+        for i in range(N):
+            w.writerow([
+                i,
+                sims_model[i], sims_bpg[i],
+                psnr_model_processed[i], psnr_bpg_ldpc[i],
+                ssim_model_processed[i], ssim_bpg_ldpc[i],
+            ])
+        w.writerow([])
+        w.writerow(["MEAN", mean_m, mean_b,
+                    float(np.mean(psnr_model_processed)), float(np.mean(psnr_bpg_ldpc)),
+                    float(np.mean(ssim_model_processed)), float(np.mean(ssim_bpg_ldpc))])
+        w.writerow(["STD", std_m, std_b,
+                    float(np.std(psnr_model_processed)), float(np.std(psnr_bpg_ldpc)),
+                    float(np.std(ssim_model_processed)), float(np.std(ssim_bpg_ldpc))])
+    print(f"Saved semantic comparison CSV to {out_csv}")
+
+    strip_path = "outputs/example_images/BPG_LDPC/visualization_strip.png"
+    image_proc.visualize_strip_with_titles_no_scores(
+        original_images=original_images,
+        processed_images=processed_images,
+        comparison_images=bpg_ldpc_images_u8,
+        output_path=strip_path,
+        row_labels=("Original image", "Proposed Technique", "BPG + LDPC"),
+        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
+    )
+    print(f"Saved horizontal strip to {strip_path}")
+
+    # ---- LaTeX table (adds CLIP rows) ----
+    latex_path = f"logs/{config.experiment_name}_metrics_clip_table.txt"
+    image_proc.export_latex_metrics_table_with_clip(
+        filepath=latex_path,
+        psnr_model=psnr_model_processed,
+        ssim_model=ssim_model_processed,
+        clip_model=sims_model,
+        psnr_comp=psnr_bpg_ldpc,
+        ssim_comp=ssim_bpg_ldpc,
+        clip_comp=sims_bpg,
+        comparison_title="BPG + LDPC",
+        proposed_title="Proposed technique",
+        col_width="1cm",
+        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
+    )
+    print(f"Wrote LaTeX metrics table to {latex_path}")
+
+    return {
+        "clip_sim_model": sims_model,
+        "clip_sim_bpg": sims_bpg,
+        "mean_clip_model": mean_m,
+        "mean_clip_bpg": mean_b,
+        "std_clip_model": std_m,
+        "std_clip_bpg": std_b,
+        "csv": out_csv,
+        "viz": output_path,
+    }

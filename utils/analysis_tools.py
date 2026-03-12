@@ -228,6 +228,7 @@ class BPGEncoder:
             working_directory: Directory to save temporary files.
         """
         self.working_directory = working_directory
+        os.makedirs(self.working_directory, exist_ok=True)
 
     def run_bpgenc(self, qp, input_dir, output_dir='temp.bpg'):
         """
@@ -392,6 +393,7 @@ class BPGDecoder:
             image_shape: Shape of the images to decode (default: CIFAR-10).
         """
         self.working_directory = working_directory
+        os.makedirs(self.working_directory, exist_ok=True)
         self.image_processor = ImageProcessor(image_shape)
 
 
@@ -426,11 +428,11 @@ class BPGDecoder:
         # Use the mean image from ImageProcessor as a fallback
         mean_image = self.image_processor.get_mean_image()
         if self.run_bpgdec(input_dir, output_dir) < 0:
-            return 0 * np.ones(image_shape) + mean_image
+            return np.broadcast_to(mean_image, image_shape).astype(np.uint8).copy()
         else:
-            decoded_image = np.array(Image.open(output_dir).convert('RGB'))
+            decoded_image = np.array(Image.open(output_dir).convert('RGB'), dtype=np.uint8)
             if decoded_image.shape != image_shape:
-                return 0 * np.ones(image_shape) + mean_image
+                return np.broadcast_to(mean_image, image_shape).astype(np.uint8).copy()
             return decoded_image
 
 def imBatchtoImage(batch_images):
@@ -669,8 +671,9 @@ def run_single_image_BPGplusLDPC(image, config, bw_ratio, snrs, mcs, save_path='
     else:
         decoded_image = bpgdecoder.decode(src_bits, image.shape, 'processed_image')
 
-    # Decode the received bits back into an image
-    
+    decoded_image = np.asarray(decoded_image)
+    if decoded_image.dtype != np.uint8:
+        decoded_image = np.clip(decoded_image, 0, 255).astype(np.uint8)
 
     # Save the processed image
     processed_image_path = os.path.join(save_path, 'processed_image.png')

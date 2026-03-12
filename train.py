@@ -8,7 +8,7 @@ import numpy as np
 from config import configOverride
 from config import config
 #from analysis import attmaps
-from skimage.metrics import structural_similarity as ssim
+#from skimage.metrics import structural_similarity as ssim
 from tensorflow.keras.utils import plot_model
 
 from models.model import deepJSCC
@@ -96,7 +96,7 @@ def train_model(model, config, train_ds, test_ds, args):
       )
   ]
 
-    tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{config.experiment_name}')
+    tensorboard = tf.keras.callbacks.TensorBoard(log_dir=f'logs/{config.experiment_name}_{config.epochs}')
     
     #if we're changing loss function weighting between epochs we need an extra callback  
     if config.loss_func == 'combined_schedule':
@@ -155,6 +155,9 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
     if "process_All_SNR" in config.TESTS_TO_RUN:
         tests.process_All_SNR(model, test_ds, train_ds, config)
 
+    if "compare_across_snr_range" in config.TESTS_TO_RUN:
+        tests.compare_across_snr_range(model, test_ds, config)
+
     if "process_images_through_channel" in config.TESTS_TO_RUN:
         tests.process_images_through_channel(model, test_ds, config, num_images=8, snr_range=(-10, 20))
     
@@ -163,6 +166,13 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
 
     if "hacky_tests" in config.TESTS_TO_RUN:
         tests.hacky_tests(model, test_ds)
+
+    if "compare_semantic_CLIP" in config.TESTS_TO_RUN:
+        # set config.clip_model_name = "ViT-B/32" if you want to change it
+        tests.compare_semantic_CLIP(model, test_ds, config, num_images=64, do_zeroshot=False)
+
+    if "compare_semantic_CLIP_vs_BPG_LDPC" in config.TESTS_TO_RUN:
+        tests.compare_semantic_CLIP_vs_BPG_LDPC(model, test_ds, config)
 
 
 def compile_model(model):

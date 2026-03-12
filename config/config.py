@@ -1,13 +1,13 @@
 
-experiment_name = "full_sched_test" #effects file locations. Will overwrite previous with same name for the most part
-workflow = "train" #train, loadAndTest
+experiment_name = "lil_test" #effects file locations. Will overwrite previous with same name for the most part
+workflow = "loadAndTest" #train, loadAndTest
 checkpoint_filepath = ""
 
-modelFile = 'SSIM_loss_10.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'big_model_mse_ssim_20.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 20
+epochs = 1
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
@@ -43,8 +43,16 @@ LDPCon = True
 bw_ratio = 1 / 6
 mcs = (3072, 6144, 2)
 
+#CLIP settings if running CLIP tests
+clip_device = "cpu" 
+clip_model_name = "ViT-B/32"
+num_semantic_eval_images = 8
+
 #For processing for channel state est testing
-snr_range=(-10, 15)
+snr_range=(5, 15)
+snr_eval_step = 1
+num_snr_eval_images = 8
+snr_sweep_output_dir = "outputs/snr_sweep"
 
 #add or remove tests (in tests.py) 
 # WARNING: Tests should work independantly but have not been properly tested running sequentially
@@ -52,11 +60,14 @@ TESTS_TO_RUN = [
     #"validate_model",
     #"time_analysis",
     "compare_to_BPG_LDPC",
+    #"compare_across_snr_range",
     #"compare_to_JPEG2000",
     #'process_All_SNR',
     #'process_random_image_at_snrs',
     #'process_images_through_channel',
     #'save_latent',
+    #'compare_semantic_CLIP',
+    #'compare_semantic_CLIP_vs_BPG_LDPC',
     #'hacky_tests',
 ]
 
@@ -65,7 +76,7 @@ dataset = "eurosatrgb" #eurosatrgb, CIFAR10, OV_MNIST
 
 #A list of mdoel configs that can be selected by arc_choice. Must match image dimensions
 
-arc_choice = 'reduced_filters_64'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
+arc_choice = 'neive_64'# neive_64, original, reduced_filters_64, Filter_decrease, original_64 
 
 #Original config from paper
 #input image 32x32x3
