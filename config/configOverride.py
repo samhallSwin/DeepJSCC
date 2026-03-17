@@ -15,7 +15,12 @@ def parse_args():
     parser.add_argument("--initial_epoch", type=int, help='Initial epoch for training')
     parser.add_argument("--has_gdn", action='store_true', help='Enable GDN')
     parser.add_argument("-c", '--channel_type', type=str, choices=['Rayleigh', 'AWGN', 'Rician', 'None'], help='Channel type')
+    parser.add_argument("--rician_k_factor", type=float, help='Rician K factor')
     parser.add_argument("-l", '--loss_func', type=str, choices=['mse', 'perceptual_loss', 'sobel_edge_loss', 'combined', 'gradient_loss', 'combined_loss_verbose', 'combined_schedule', 'ssim_loss'], help='Loss function')
+    parser.add_argument("--use_snr_side_info", action='store_true', help='Condition encoder and decoder on SNR side information')
+    parser.add_argument("--film_hidden_units", type=int, help='Hidden size for FiLM conditioning MLPs')
+    parser.add_argument("--random_snr_training", action='store_true', help='Sample a random SNR per training image from train_snr_range')
+    parser.add_argument("--train_snr_range", type=str, help='Training SNR range as min,max for random SNR training')
     parser.add_argument("--set_channel_filters", action='store_true', help='Set number of parameters by channel_filters')
     parser.add_argument("--channel_filters", type=int, help='Number of channel filters')
     parser.add_argument("-d", '--dataset', type=str, choices=['CIFAR10', 'eurosatrgb', 'OV_MNIST'], help='Dataset name')
@@ -45,7 +50,14 @@ def override_config_with_args(config, args):
     if args.checkpoint_filepath: config.checkpoint_filepath = args.checkpoint_filepath
     if args.has_gdn: config.has_gdn = True
     if args.channel_type: config.channel_type = args.channel_type
+    if args.rician_k_factor is not None: config.rician_k_factor = args.rician_k_factor
     if args.loss_func: config.loss_func = args.loss_func
+    if args.use_snr_side_info: config.use_snr_side_info = True
+    if args.film_hidden_units: config.film_hidden_units = args.film_hidden_units
+    if args.random_snr_training: config.random_snr_training = True
+    if args.train_snr_range:
+        snr_min, snr_max = map(float, args.train_snr_range.split(","))
+        config.train_snr_range = (snr_min, snr_max)
     if args.set_channel_filters: config.set_channel_filters = True
     if args.channel_filters: config.channel_filters = args.channel_filters
     if args.dataset: config.dataset = args.dataset

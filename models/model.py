@@ -4,10 +4,47 @@ import numpy as np
 from models.channellayer import RayleighChannel, AWGNChannel, RicianChannel
 #from models.vitblock import VitBlock
 
+
+class FiLMLayer(tf.keras.layers.Layer):
+    def __init__(self, hidden_units=64, **kwargs):
+        super().__init__(**kwargs)
+        self.hidden_units = hidden_units
+        self.mlp = tf.keras.Sequential([
+            tf.keras.layers.Dense(hidden_units, activation="relu"),
+            tf.keras.layers.Dense(hidden_units, activation="relu"),
+        ])
+        self.gamma_layer = None
+        self.beta_layer = None
+
+    def build(self, input_shape):
+        channels = int(input_shape[-1])
+        self.gamma_layer = tf.keras.layers.Dense(channels)
+        self.beta_layer = tf.keras.layers.Dense(channels)
+        super().build(input_shape)
+
+    def call(self, x, snr_db):
+        if snr_db is None:
+            return x
+
+        snr_db = tf.cast(snr_db, tf.float32)
+        if snr_db.shape.rank == 0:
+            snr_db = tf.reshape(snr_db, [1, 1])
+            snr_db = tf.repeat(snr_db, tf.shape(x)[0], axis=0)
+        else:
+            snr_db = tf.reshape(snr_db, [-1, 1])
+
+        conditioning = self.mlp(snr_db)
+        gamma = self.gamma_layer(conditioning)
+        beta = self.beta_layer(conditioning)
+        gamma = tf.reshape(gamma, [-1, 1, 1, tf.shape(x)[-1]])
+        beta = tf.reshape(beta, [-1, 1, 1, tf.shape(x)[-1]])
+        return x * (1.0 + gamma) + beta
+
 class deepJSCC(tf.keras.Model):
     def __init__(self, has_gdn=True,
                  num_symbols=512, snrdB=25, channel='AWGN', input_size=32,
-                 encoder_config=None, set_channel_filters=False, channel_filters=64, decoder_config=None, debug_file=None):
+                 encoder_config=None, set_channel_filters=False, channel_filters=64, decoder_config=None, debug_file=None,
+                 use_snr_side_info=False, film_hidden_units=64, rician_k_factor=2.0):
         """
         :param encoder_config: List of dictionaries for encoder layers configuration.
         :param decoder_config: List of dictionaries for decoder layers configuration.
@@ -18,6 +55,9 @@ class deepJSCC(tf.keras.Model):
         self.debug = True
         self.first_call = True
         self.debug_file = debug_file  # File to write debug logs
+        self.use_snr_side_info = use_snr_side_info
+        self.default_snrdB = float(snrdB)
+        self.rician_k_factor = float(rician_k_factor)
 
         # Default configurations
         encoder_config = encoder_config or [
@@ -43,7 +83,9 @@ class deepJSCC(tf.keras.Model):
             channel_filters=channel_filters,
             gdn_func="forward" if has_gdn else "None",
             debug=self.debug,
-            debug_file=debug_file
+            debug_file=debug_file,
+            use_snr_side_info=use_snr_side_info,
+            film_hidden_units=film_hidden_units,
         )
 
         # Channel
@@ -54,7 +96,7 @@ class deepJSCC(tf.keras.Model):
         elif channel == 'AWGN':
             self.channel = AWGNChannel(snrdB)
         elif channel == 'Rician':
-            self.channel = RicianChannel(snrdB, k=2)
+            self.channel = RicianChannel(snrdB, k=self.rician_k_factor)
         else:
             self.channel = tf.identity
 
@@ -64,23 +106,34 @@ class deepJSCC(tf.keras.Model):
             input_size=input_size,
             gdn_func="inverse" if has_gdn else "None",
             debug=self.debug,
-            debug_file=debug_file
+            debug_file=debug_file,
+            use_snr_side_info=use_snr_side_info,
+            film_hidden_units=film_hidden_units,
         )
 
         # Disable debug after initialization
         self.debug = False
 
     def call(self, x):
+        snr_db = None
+        if isinstance(x, (tuple, list)):
+            x, snr_db = x
+        elif self.use_snr_side_info:
+            snr_db = tf.fill([tf.shape(x)[0]], tf.cast(self.default_snrdB, tf.float32))
+
         # Debug shapes only during the first call
         if self.first_call:
             self.log_debug(f"Input shape = {x.shape}")
-        x = self.encoder(x)
+        x = self.encoder(x, snr_db=snr_db)
         if self.first_call:
             self.log_debug(f"Encoder output shape = {x.shape}")
-        x = self.channel(x)
+        if callable(getattr(self.channel, "call", None)) and self.channel is not tf.identity:
+            x = self.channel(x, snrdB=snr_db)
+        else:
+            x = self.channel(x)
         if self.first_call:
             self.log_debug(f"Channel output shape = {x.shape}")
-        x = self.decoder(x)
+        x = self.decoder(x, snr_db=snr_db)
         if self.first_call:
             self.log_debug(f"Decoder output shape = {x.shape}")
 
@@ -100,7 +153,7 @@ class deepJSCC(tf.keras.Model):
         """
         Passes the input through the encoder and saves the latent features to a file.
         """
-        latent = self.encoder(input_image)
+        latent = self.encoder(input_image, snr_db=None)
         np.save(file_path, latent.numpy())  # Save latent features to file
 
     def load_and_decode(self, file_path):
@@ -109,7 +162,7 @@ class deepJSCC(tf.keras.Model):
         """
         latent = np.load(file_path)  # Load latent features from file
         latent_tensor = tf.convert_to_tensor(latent, dtype=tf.float32)  # Convert to tensor
-        output_image = self.decoder(latent_tensor)
+        output_image = self.decoder(latent_tensor, snr_db=None)
         return output_image
 
     #Slows down everything and doesn't seem useful..
@@ -120,12 +173,14 @@ class deepJSCC(tf.keras.Model):
     #    return self.encoder(x)
 
 class Encoder(tf.keras.layers.Layer):
-    def __init__(self, config, num_symbols, gdn_func=None, input_size=32, set_channel_filters=False, channel_filters=64, debug=False, debug_file=None, **kwargs):
+    def __init__(self, config, num_symbols, gdn_func=None, input_size=32, set_channel_filters=False, channel_filters=64, debug=False, debug_file=None, use_snr_side_info=False, film_hidden_units=64, **kwargs):
         super().__init__()
         self.layers = []
+        self.film_layers = []
         self.debug = debug
         self.first_call = True
         self.debug_file = debug_file  # File to write debug logs
+        self.use_snr_side_info = use_snr_side_info
         current_size = input_size
 
         for idx, layer_cfg in enumerate(config):
@@ -139,6 +194,7 @@ class Encoder(tf.keras.layers.Layer):
                 section="Encoder",
                 gdn_func=gdn_func
             ))
+            self.film_layers.append(FiLMLayer(hidden_units=film_hidden_units) if use_snr_side_info else None)
 
         if self.debug: #Hacky way of getting this layer into the visualisation tool
             self.log_debug(f"Building Encoder Layer output, Config: {{'filters': {num_symbols // (input_size // (2 ** len(config))) ** 2 * 2}, 'kernel_size': 1, 'stride': 1, 'block_type': 'C'}}, GDN: None")
@@ -154,10 +210,13 @@ class Encoder(tf.keras.layers.Layer):
                 kernel_size=1
             )
         )
+        self.film_layers.append(FiLMLayer(hidden_units=film_hidden_units) if use_snr_side_info else None)
 
-    def call(self, x):
+    def call(self, x, snr_db=None):
         for idx, sublayer in enumerate(self.layers):
             x = sublayer(x)
+            if self.use_snr_side_info and self.film_layers[idx] is not None:
+                x = self.film_layers[idx](x, snr_db)
             if self.debug and self.first_call:
                 print(f"Layer {idx + 1}:")
                 print(f"  Name: {sublayer.name}")
@@ -184,12 +243,14 @@ class Encoder(tf.keras.layers.Layer):
 
 
 class Decoder(tf.keras.layers.Layer):
-    def __init__(self, config, gdn_func=None, input_size=32, debug=False, debug_file=None, **kwargs):
+    def __init__(self, config, gdn_func=None, input_size=32, debug=False, debug_file=None, use_snr_side_info=False, film_hidden_units=64, **kwargs):
         super().__init__()
         self.layers = []
+        self.film_layers = []
         self.debug = debug  # Store the debug flag
         self.first_call = True  # Track the first execution
         self.debug_file = debug_file
+        self.use_snr_side_info = use_snr_side_info
         current_size = input_size // 4  # Assuming a 2x2 downsampling factor
 
         for idx, layer_cfg in enumerate(config):
@@ -199,6 +260,7 @@ class Decoder(tf.keras.layers.Layer):
                 self.layers.append(tf.keras.layers.Resizing(
                     layer_cfg["upsample_size"], layer_cfg["upsample_size"]
                 ))
+                self.film_layers.append(None)
                 current_size = layer_cfg["upsample_size"]
 
             self.layers.append(build_block(
@@ -209,6 +271,7 @@ class Decoder(tf.keras.layers.Layer):
                 section="Decoder",
                 gdn_func=gdn_func
             ))
+            self.film_layers.append(FiLMLayer(hidden_units=film_hidden_units) if use_snr_side_info else None)
 
         # Final layer to reconstruct the image
         if self.debug:
@@ -220,13 +283,16 @@ class Decoder(tf.keras.layers.Layer):
                 activation='sigmoid'
             )
         )
+        self.film_layers.append(FiLMLayer(hidden_units=film_hidden_units) if use_snr_side_info else None)
 
-    def call(self, x):
+    def call(self, x, snr_db=None):
         b, c, _ = x.shape
         x = tf.reshape(x, (-1, 8, 8, c * 2 // 64))
 
         for idx, sublayer in enumerate(self.layers):
             x = sublayer(x)
+            if self.use_snr_side_info and self.film_layers[idx] is not None:
+                x = self.film_layers[idx](x, snr_db)
             if self.debug and self.first_call:
                 print(f"Layer {idx + 1}:")
                 print(f"  Name: {sublayer.name}")

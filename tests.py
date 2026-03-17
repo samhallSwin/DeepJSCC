@@ -1,871 +1,1065 @@
-import os
-from utils import image_proc
-from utils import analysis_tools
-import tensorflow as tf
-import numpy as np
-import matplotlib.pyplot as plt
-from models.model import simulate_channel
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
-from skimage.metrics import peak_signal_noise_ratio as compute_psnr
-from skimage.metrics import structural_similarity as compute_ssim
-from PIL import Image
-import pandas as pd
-import random
-
 import csv
-from datetime import datetime
-from utils.clip_metrics import CLIPHandle, clip_cosine_similarities
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
+from PIL import Image
+from skimage.metrics import peak_signal_noise_ratio
+from skimage.metrics import structural_similarity
+
+from utils import analysis_tools
+from utils.datasets import dataset_generator
 
 
-def _collect_eval_images(dataset, num_images):
-    selected_images = []
-
-    for images, _ in dataset:
-        images_np = images.numpy()
-        for img in images_np:
-            selected_images.append(img)
-            if len(selected_images) >= num_images:
-                return selected_images
-
-    return selected_images
+def _to_uint8_image(image):
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.floating):
+        image = np.clip(image, 0.0, 1.0)
+        image = (image * 255.0).astype(np.uint8)
+    else:
+        image = np.clip(image, 0, 255).astype(np.uint8)
+    return image
 
 
-def _evaluate_model_at_snr(model, images, snr):
-    model.channel.set_snr(snr)
-
-    psnr_scores = []
-    ssim_scores = []
-    reconstructed_images = []
-
-    for img in images:
-        img_tensor = tf.expand_dims(img, axis=0)
-        processed_image = tf.squeeze(model(img_tensor, training=False)).numpy()
-        reconstructed_images.append(processed_image)
-
-        original_u8 = (img * 255).astype(np.uint8)
-        processed_u8 = (np.clip(processed_image, 0, 1) * 255).astype(np.uint8)
-
-        psnr_scores.append(analysis_tools.calculate_psnr(original_u8, processed_u8))
-        ssim_scores.append(analysis_tools.calculate_ssim(original_u8, processed_u8))
-
-    return reconstructed_images, psnr_scores, ssim_scores
+def _save_image(image, filepath):
+    Image.fromarray(_to_uint8_image(image)).save(filepath)
 
 
-def _evaluate_bpg_baseline_at_snr(images, config, snr, output_dir, use_ldpc):
-    baseline_images = []
-    psnr_scores = []
-    ssim_scores = []
-
-    baseline_name = "bpg_ldpc" if use_ldpc else "bpg"
-    baseline_output_dir = os.path.join(output_dir, f"temp_{baseline_name}_snr_{snr}")
-    os.makedirs(baseline_output_dir, exist_ok=True)
-
-    for idx, img in enumerate(images):
-        original_u8 = (img * 255).astype(np.uint8)
-        comparison_image, _ = analysis_tools.run_single_image_BPGplusLDPC(
-            original_u8,
-            config,
-            config.bw_ratio,
-            snr,
-            config.mcs,
-            save_path=baseline_output_dir,
-            LDPCon=use_ldpc,
-        )
-        baseline_images.append(comparison_image)
-        psnr_scores.append(analysis_tools.calculate_psnr(original_u8, comparison_image))
-        ssim_scores.append(analysis_tools.calculate_ssim(original_u8, comparison_image))
-
-        if idx == 0:
-            sample_path = os.path.join(output_dir, f"{baseline_name}_sample_snr_{snr}.png")
-            Image.fromarray(comparison_image).save(sample_path)
-
-    return baseline_images, psnr_scores, ssim_scores
+def _compute_psnr_ssim(reference_u8, candidate_u8):
+    psnr_value = peak_signal_noise_ratio(reference_u8, candidate_u8, data_range=255)
+    ssim_value = structural_similarity(
+        reference_u8,
+        candidate_u8,
+        channel_axis=-1,
+        data_range=255,
+    )
+    return float(psnr_value), float(ssim_value)
 
 
-def _write_snr_sweep_plot(results_df, output_path):
-    plt.figure(figsize=(10, 5))
+def _extract_images(batch_inputs):
+    if isinstance(batch_inputs, (tuple, list)):
+        return batch_inputs[0]
+    return batch_inputs
 
-    plt.subplot(1, 2, 1)
-    plt.plot(results_df["snr_db"], results_df["model_psnr_mean"], marker="o", label="DeepJSCC")
-    plt.plot(results_df["snr_db"], results_df["bpg_ldpc_psnr_mean"], marker="o", label="BPG+LDPC")
-    plt.plot(results_df["snr_db"], results_df["bpg_psnr_mean"], marker="o", label="BPG")
+
+def _model_predict(model, images, snr_db=None):
+    images = tf.convert_to_tensor(images, dtype=tf.float32)
+    if getattr(model, "use_snr_side_info", False):
+        if snr_db is None:
+            snr_db = getattr(model, "default_snrdB", 0.0)
+        snr_tensor = tf.fill((tf.shape(images)[0],), tf.cast(snr_db, tf.float32))
+        return model((images, snr_tensor), training=False).numpy()
+    return model(images, training=False).numpy()
+
+
+def _get_clip_handle(config):
+    if not getattr(config, "enable_clip_metric", False):
+        return None
+
+    from utils.clip_metrics import CLIPHandle
+
+    return CLIPHandle(
+        model_name=getattr(config, "clip_model_name", "ViT-B/32"),
+        device=getattr(config, "clip_device", "cpu"),
+    )
+
+
+def _compute_clip_similarity(reference_f01, candidate_f01, clip_handle):
+    if clip_handle is None:
+        return None
+
+    from utils.clip_metrics import clip_cosine_similarities
+
+    similarities = clip_cosine_similarities(
+        [np.asarray(reference_f01, dtype=np.float32)],
+        [np.asarray(candidate_f01, dtype=np.float32)],
+        clip_handle,
+        batch_size=1,
+    )
+    return float(similarities[0])
+
+
+def _collect_eval_images(test_ds, num_images):
+    collected = []
+
+    for images, _ in test_ds:
+        originals = _extract_images(images).numpy()
+        for image in originals:
+            collected.append(image)
+            if len(collected) >= num_images:
+                return collected
+
+    return collected
+
+
+def _collect_eval_samples_with_labels(config, num_images):
+    labeled_ds = dataset_generator(config.test_dir, config, shuffle=False)
+
+    images_out = []
+    labels_out = []
+
+    for images, labels in labeled_ds:
+        images_np = images.numpy().astype(np.float32) / 255.0
+        labels_np = labels.numpy()
+        for image, label in zip(images_np, labels_np):
+            images_out.append(image)
+            labels_out.append(int(label))
+            if len(images_out) >= num_images:
+                return images_out, labels_out
+
+    return images_out, labels_out
+
+
+def _dataset_class_names(config):
+    return sorted(
+        entry
+        for entry in os.listdir(config.test_dir)
+        if os.path.isdir(os.path.join(config.test_dir, entry))
+    )
+
+
+def _get_downstream_classifier(config):
+    if not getattr(config, "enable_downstream_metric", False):
+        return None
+
+    import timm
+    import torch
+    from timm.data import create_transform, resolve_model_data_config
+
+    class DownstreamClassifier:
+        def __init__(self, model_id, device):
+            self.device = device
+            self.model = timm.create_model(f"hf-hub:{model_id}", pretrained=True).to(device)
+            self.model.eval()
+            self.data_config = resolve_model_data_config(self.model)
+            self.transform = create_transform(**self.data_config, is_training=False)
+            self.label_names = list(self.model.pretrained_cfg.get("label_names", []))
+
+        def predict(self, image_f01):
+            with torch.no_grad():
+                pil_image = Image.fromarray((np.clip(image_f01, 0.0, 1.0) * 255.0).astype(np.uint8))
+                tensor = self.transform(pil_image).unsqueeze(0).to(self.device)
+                logits = self.model(tensor)
+                probs = torch.softmax(logits, dim=-1)
+                pred = int(torch.argmax(probs, dim=-1).item())
+                conf = float(torch.max(probs, dim=-1).values.item())
+                return pred, conf
+
+    return DownstreamClassifier(
+        model_id=getattr(config, "downstream_model_id", "cm93/resnet18-eurosat"),
+        device=getattr(config, "downstream_device", "cpu"),
+    )
+
+
+def _build_snr_values(snr_range, snr_step):
+    snr_min, snr_max = snr_range
+    snr_min = float(snr_min)
+    snr_max = float(snr_max)
+    snr_step = float(snr_step)
+
+    if snr_step <= 0:
+        raise ValueError(f"snr_eval_step must be positive, got {snr_step}")
+
+    snr_values = []
+    current = snr_min
+    epsilon = snr_step * 1e-6
+
+    while current <= snr_max + epsilon:
+        snr_values.append(round(current, 6))
+        current += snr_step
+
+    return snr_values
+
+
+def _write_snr_summary_plots(summary_rows, output_dir):
+    snr_values = [row["snr_db"] for row in summary_rows]
+    model_psnr = [row["model_psnr_mean"] for row in summary_rows]
+    baseline_psnr = [row["bpg_ldpc_psnr_mean"] for row in summary_rows]
+    raw_bpg_psnr = [row["bpg_raw_psnr_mean"] for row in summary_rows]
+    model_ssim = [row["model_ssim_mean"] for row in summary_rows]
+    baseline_ssim = [row["bpg_ldpc_ssim_mean"] for row in summary_rows]
+    raw_bpg_ssim = [row["bpg_raw_ssim_mean"] for row in summary_rows]
+    baseline_ber = [row["bpg_ldpc_ber_mean"] for row in summary_rows]
+    raw_bpg_ber = [row["bpg_raw_ber_mean"] for row in summary_rows]
+    baseline_crc_ok = [row["bpg_ldpc_crc_ok_mean"] for row in summary_rows]
+    has_clip = "model_clip_mean" in summary_rows[0]
+    has_downstream = "model_acc_mean" in summary_rows[0]
+    if has_clip:
+        model_clip = [row["model_clip_mean"] for row in summary_rows]
+        baseline_clip = [row["bpg_ldpc_clip_mean"] for row in summary_rows]
+        raw_bpg_clip = [row["bpg_raw_clip_mean"] for row in summary_rows]
+    if has_downstream:
+        original_acc = [row["original_acc_mean"] for row in summary_rows]
+        model_acc = [row["model_acc_mean"] for row in summary_rows]
+        baseline_acc = [row["bpg_ldpc_acc_mean"] for row in summary_rows]
+        raw_bpg_acc = [row["bpg_raw_acc_mean"] for row in summary_rows]
+
+    psnr_plot_path = os.path.join(output_dir, "mean_psnr_vs_snr.png")
+    ssim_plot_path = os.path.join(output_dir, "mean_ssim_vs_snr.png")
+    ber_plot_path = os.path.join(output_dir, "mean_bpg_ldpc_ber_vs_snr.png")
+    crc_plot_path = os.path.join(output_dir, "mean_bpg_ldpc_crc_ok_vs_snr.png")
+    clip_plot_path = os.path.join(output_dir, "mean_clip_vs_snr.png") if has_clip else None
+    acc_plot_path = os.path.join(output_dir, "mean_downstream_acc_vs_snr.png") if has_downstream else None
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(snr_values, model_psnr, marker="o", label="Model")
+    plt.plot(snr_values, baseline_psnr, marker="o", label="BPG+LDPC")
+    plt.plot(snr_values, raw_bpg_psnr, marker="o", label="BPG raw")
     plt.xlabel("SNR (dB)")
-    plt.ylabel("PSNR")
-    plt.title("PSNR vs SNR")
+    plt.ylabel("Mean PSNR")
+    plt.title("Mean PSNR vs SNR")
     plt.grid(True, alpha=0.3)
     plt.legend()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(results_df["snr_db"], results_df["model_ssim_mean"], marker="o", label="DeepJSCC")
-    plt.plot(results_df["snr_db"], results_df["bpg_ldpc_ssim_mean"], marker="o", label="BPG+LDPC")
-    plt.plot(results_df["snr_db"], results_df["bpg_ssim_mean"], marker="o", label="BPG")
-    plt.xlabel("SNR (dB)")
-    plt.ylabel("SSIM")
-    plt.title("SSIM vs SNR")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
     plt.tight_layout()
-    plt.savefig(output_path, bbox_inches="tight")
+    plt.savefig(psnr_plot_path, bbox_inches="tight")
     plt.close()
 
-def validate_model(model, test_ds):
-    print("Validating the model...")
-    loss = model.evaluate(test_ds)
-    print(loss)
-    return True
-
-def visualise_latent():
-    #analysis_tools.latent_vis(model, test_ds)
-    #attmaps.att_mapper(test_ds, model, config)
-
-    #awgn_channel = AWGNChannel(snrdB=15)
-    #train_ds, _ = prepare_dataset(config)
-#
-    #original_images, noisy_images, avg_psnr, avg_ssim = analysis_tools.run_awgn_on_images(train_ds, awgn_channel, config)
-
-   # print(f"Average PSNR: {avg_psnr:.2f} dB")
-   # print(f"Average SSIM: {avg_ssim:.4f}")
-   # output_dir = "outputs/awgn_images"
-   # os.makedirs(output_dir, exist_ok=True)
-   # for idx, (orig, noisy) in enumerate(zip(original_images[0], noisy_images[0])):
-   #     Image.fromarray(orig.astype(np.uint8)).save(f"{output_dir}/original_{idx}.png")
-   #     Image.fromarray(noisy.astype(np.uint8)).save(f"{output_dir}/noisy_{idx}.png")
-    return True
-
-def save_latent(model, test_ds, config):
-    print('Processing images and saving latent representations and original images to disk')
-
-    output_dir = 'outputs/lantent_analysis/'
-    os.makedirs(output_dir, exist_ok=True)
-    
-    images_count = 1
-    for images, _ in test_ds.shuffle(1).take(1):  # Shuffle and take one batch
-        num_images = min(images_count, images.shape[0])  # Ensure there are at least 8 images
-        selected_images = images[:num_images]  # Take the first 8 images
-        break  # Exit after processing one batch
-
-    latent_path = f"{output_dir}latent_batch.npy"
-    channel_output_path = f"{output_dir}channel_output_batch.npy"
-
-    # Save the original images for comparison
-    original_images_np = (selected_images.numpy() * 255).astype(np.uint8)
-    for i, original_image_np in enumerate(original_images_np):
-        original_img = Image.fromarray(original_image_np)
-        original_img.save(f"{output_dir}original_image_{i}.png")
-
-    # Save encoder's output for the selected images
-    model.save_latent_representation(selected_images, latent_path)
-
-    # Simulate the channel for the batch
-    simulate_channel(latent_path, channel_output_path, channel=config.channel_type, snr_db=config.train_snrdB)
-
-    # Decode the channel output for the batch
-    output_images = model.load_and_decode(channel_output_path)
-
-    # Save each reconstructed image
-    output_images_np = (output_images.numpy() * 255).astype(np.uint8)
-    for i, output_image_np in enumerate(output_images_np):
-        output_img = Image.fromarray(output_image_np)
-        output_img.save(f"{output_dir}reconstructed_image_{i}.png")
-
-    print("Processing completed. Original images, latent representations, and reconstructed images saved.")
-
-    latent = np.load(f"{output_dir}latent_batch.npy")
-    channel_output = np.load(f"{output_dir}channel_output_batch.npy")
-
-    mse = np.mean((latent - channel_output) ** 2)
-    print(f"Mean Squared Error (MSE): {mse}")
-
-    image_proc.create_plots_from_latent(latent, channel_output, output_dir)
-
-def process_images_through_channel(model, test_ds, config, num_images=8, snr_range=(-10, 20)):
-    """
-    Pass random images directly through the channel layer at random SNR values.
-    Visualize the original and channel-modified outputs.
-    :param model: Trained model with a channel layer.
-    :param test_ds: Test dataset.
-    :param config: Config object containing settings.
-    :param num_images: Number of images to process and visualize.
-    :param snr_range: Tuple specifying the range of SNR values.
-    """
-    print('Processing images directly through the channel layer')
-
-    output_dir = "outputs/channel_processed/"
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Select random images from the dataset
-    # Select random images from the dataset
-    vis_images, _ = next(iter(test_ds))  # Take the first batch
-    vis_images = vis_images[:num_images]  # Take the first `num_images` images from the batch
-
-    # Generate a random SNR for each image
-    snr_values = [random.uniform(*snr_range) for _ in range(num_images)]
-
-    # Prepare for visualization
-    fig, axes = plt.subplots(num_images, 2, figsize=(10, 5 * num_images))  # 2 columns: original and channel-modified
-    for i, image in enumerate(vis_images):
-        snr = snr_values[i]
-        print(f"Processing image {i + 1} with SNR={snr:.2f}dB")
-
-        # Adjust the SNR value in the model
-        model.channel.set_snr(snr)
-
-        # Prepare the image for the channel
-        image_np = image.numpy()  # Original image in NumPy format
-        flat_image = np.reshape(image_np, (-1))  # Flatten the image to a 1D vector
-        symbols = np.stack(np.split(flat_image, 2), axis=-1)  # Split into I/Q components
-        symbols_tensor = tf.convert_to_tensor([symbols], dtype=tf.float32)  # Add batch dimension
-
-        # Pass the reshaped input through the channel
-        channel_output = model.channel(symbols_tensor)  # Pass through channel
-        channel_output_np = channel_output.numpy()[0]  # Remove batch dimension
-
-        # Reconstruct the image shape from channel output
-        reconstructed_flat = np.concatenate(np.split(channel_output_np, 2, axis=-1), axis=0).flatten()
-        channel_image = np.reshape(reconstructed_flat, image_np.shape)  # Reshape to original image shape
-
-        # Scale and convert for visualization
-        original_image = (image_np * 255.0).astype(np.uint8)
-        channel_image = (channel_image * 255.0).astype(np.uint8)
-
-        # Save the channel-modified image
-        save_path = os.path.join(output_dir, f"image_{i + 1}_snr_{snr:.2f}.png")
-        plt.imsave(save_path, channel_image)
-
-        # Visualize the results
-        axes[i, 0].imshow(original_image)
-        axes[i, 0].set_title("Original Image")
-        axes[i, 0].axis("off")
-
-        axes[i, 1].imshow(channel_image)
-        axes[i, 1].set_title(f"Channel Output\nSNR={snr:.2f}dB")
-        axes[i, 1].axis("off")
-
+    plt.figure(figsize=(8, 5))
+    plt.plot(snr_values, model_ssim, marker="o", label="Model")
+    plt.plot(snr_values, baseline_ssim, marker="o", label="BPG+LDPC")
+    plt.plot(snr_values, raw_bpg_ssim, marker="o", label="BPG raw")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("Mean SSIM")
+    plt.title("Mean SSIM vs SNR")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "channel_visualizations.png"))
-    plt.show()
+    plt.savefig(ssim_plot_path, bbox_inches="tight")
+    plt.close()
 
-    print(f"Channel-processed images saved to {output_dir}")
+    plt.figure(figsize=(8, 5))
+    plt.plot(snr_values, baseline_ber, marker="o", label="BPG+LDPC BER")
+    plt.plot(snr_values, raw_bpg_ber, marker="o", label="BPG raw BER")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("Mean BER")
+    plt.title("Mean BPG+LDPC BER vs SNR")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(ber_plot_path, bbox_inches="tight")
+    plt.close()
 
-def process_All_SNR(model, test_ds, train_ds, config, N=3):
-    """
-    Process each batch N times, assigning SNR values evenly across all integer values in the range.
-    :param model: The trained model with a channel layer.
-    :param test_ds: Test dataset.
-    :param train_ds: Train dataset.
-    :param config: Config object containing the SNR range and other settings.
-    :param N: Number of times each batch is processed at different SNRs.
-    """
-    snr_range = config.snr_range  # e.g., (-10, 20)
-    print('Processing images with balanced SNR values across batches')
+    plt.figure(figsize=(8, 5))
+    plt.plot(snr_values, baseline_crc_ok, marker="o", label="BPG+LDPC CRC success")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("Mean CRC success rate")
+    plt.title("Mean BPG+LDPC CRC Success vs SNR")
+    plt.ylim(-0.05, 1.05)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(crc_plot_path, bbox_inches="tight")
+    plt.close()
 
-    output_dir = "dataset/processedEurosat/"
-    vis_output_dir = os.path.join(output_dir, "visualizations")
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(vis_output_dir, exist_ok=True)
-
-    datasets = {"train": train_ds, "test": test_ds}
-    metadata = []
-
-    # Generate a list of all integer SNR values in the range
-    all_snrs = list(range(snr_range[0], snr_range[1] + 1))
-
-    # Ensure we process N repeats for each batch
-    for dataset_name, dataset in datasets.items():
-        dataset_dir = os.path.join(output_dir, dataset_name)
-        os.makedirs(dataset_dir, exist_ok=True)
-
-        for idx, (images, _) in enumerate(dataset):
-            # Shuffle SNRs to avoid sequential structure, and take only N values for this batch
-            random.shuffle(all_snrs)  # Shuffle the SNR list
-            snr_values_for_batch = all_snrs[:N]  # Take the first N shuffled SNRs
-
-            for repeat, snr in enumerate(snr_values_for_batch):
-                print(f"  Processing batch {idx + 1}, repeat {repeat + 1} with SNR={snr}dB for {dataset_name} dataset...")
-
-                # Adjust the SNR value in the model
-                model.channel.set_snr(snr)
-
-                snr_recon_dir = os.path.join(dataset_dir, f"SNR_{snr}")
-                os.makedirs(snr_recon_dir, exist_ok=True)
-
-                # Encode images to latent space
-                latent = model.encoder(images)
-
-                # Pass latents through the channel
-                noisy_latent = model.channel(latent)
-
-                # Decode latents to reconstruct images
-                reconstructed_images = model.decoder(noisy_latent)
-
-                # Save each reconstructed image
-                for i in range(images.shape[0]):
-                    recon_image = (reconstructed_images[i].numpy() * 255.0).astype(np.uint8)
-                    recon_filename = f"{dataset_name}_recon_batch{idx + 1}_repeat{repeat + 1}_{i}.png"
-                    recon_filepath = os.path.join(snr_recon_dir, recon_filename)
-                    Image.fromarray(recon_image).save(recon_filepath)
-
-                    # Append metadata
-                    metadata.append({
-                        "snr": snr,
-                        "reconstructed_file": recon_filepath
-                    })
-
-                # Visualize the selected images for this SNR
-                if idx == 0 and repeat == 0:  # Only visualize for the first batch and first repeat
-                    vis_images, _ = next(iter(test_ds))  # Take a batch from test_ds
-                    vis_images = vis_images[:8]  # Take the first 8 images
-                    vis_latents = model.encoder(vis_images)
-                    vis_noisy_latents = model.channel(vis_latents)
-                    vis_reconstructed = model.decoder(vis_noisy_latents)
-
-                    # Save and display visualizations for 8 images
-                    fig, axes = plt.subplots(8, 3, figsize=(15, 20))  # 3 columns: original, reconstructed, metrics
-                    for i in range(8):
-                        original_image = (vis_images[i].numpy() * 255.0).astype(np.uint8)  # Original image
-                        reconstructed_image = (vis_reconstructed[i].numpy() * 255.0).astype(np.uint8)  # Reconstructed image
-
-                        # Compute PSNR metric
-                        psnr_value = psnr(original_image, reconstructed_image, data_range=255)
-
-                        # Display original image
-                        axes[i, 0].imshow(original_image)
-                        axes[i, 0].set_title("Original")
-                        axes[i, 0].axis("off")
-
-                        # Display reconstructed image
-                        axes[i, 1].imshow(reconstructed_image)
-                        axes[i, 1].set_title(f"Reconstructed\nSNR={snr}dB")
-                        axes[i, 1].axis("off")
-
-                        # Display metrics
-                        axes[i, 2].text(0.1, 0.5, f"PSNR: {psnr_value:.2f}",
-                                        fontsize=12, va='center', ha='left', wrap=True)
-                        axes[i, 2].axis("off")
-
-                    plt.tight_layout()
-                    vis_filename = f"{dataset_name}_SNR_{snr}_visualization.png"
-                    vis_filepath = os.path.join(vis_output_dir, vis_filename)
-                    plt.savefig(vis_filepath)  # Save the visualization
-
-    metadata_file = os.path.join(output_dir, "metadata.csv")
-    pd.DataFrame(metadata).to_csv(metadata_file, index=False)
-    print(f"Processing complete. Metadata saved to {metadata_file}. Visualizations saved to {vis_output_dir}.")
-
-
-def process_random_image_at_snrs(model, test_ds, num_images=5, snr_range=(-20, 20), step=5, save_dir="outputs/channel_state_est/"):
-    """
-    Process multiple random images from the test set through the model at different SNRs
-    and display results in a single plot for each image.
-    :param model: The trained model with a channel layer.
-    :param test_ds: Test dataset.
-    :param num_images: Number of random images to process.
-    :param snr_range: Tuple specifying the SNR range (min, max).
-    :param step: Step size for SNR values.
-    :param save_dir: Directory to save the visualizations.
-    """
-    print("Processing multiple random images at different SNR values...")
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Generate SNR values from the specified range
-    snr_values = list(range(snr_range[0], snr_range[1] + 1, step))
-
-    # Extract one batch from the dataset
-    test_images, _ = next(iter(test_ds))  # Get a batch of test images
-    batch_size = test_images.shape[0]
-
-    if num_images > batch_size:
-        raise ValueError(f"num_images ({num_images}) exceeds the batch size ({batch_size}). Reduce num_images or increase the test batch size.")
-
-    # Randomly select indices from the batch
-    selected_indices = random.sample(range(batch_size), num_images)  # Randomly choose indices
-    selected_images = tf.gather(test_images, selected_indices)  # Use tf.gather to extract the selected images
-
-    for img_idx, image in enumerate(selected_images):
-        image = tf.expand_dims(image, axis=0)  # Add batch dimension
-        original_image_np = (image.numpy()[0] * 255.0).astype(np.uint8)  # Prepare for visualization
-
-        # Prepare for visualization
-        fig, axes = plt.subplots(1, len(snr_values) + 1, figsize=(20, 5))  # One row for this image
-        axes[0].imshow(original_image_np)
-        axes[0].set_title("Original")
-        axes[0].axis("off")
-
-        # Process the image at each SNR value
-        for i, snr in enumerate(snr_values):
-            print(f"Processing image {img_idx + 1} at SNR={snr}dB")
-
-            # Set the SNR value in the model
-            model.channel.set_snr(snr)
-
-            # Encode, pass through channel, and decode
-            latent = model.encoder(image)
-            noisy_latent = model.channel(latent)
-            reconstructed_image = model.decoder(noisy_latent)
-
-            # Convert the reconstructed image to NumPy format for metrics and display
-            reconstructed_image_np = (reconstructed_image.numpy()[0] * 255.0).astype(np.uint8)
-
-            # Compute PSNR and SSIM metrics
-            psnr_value = compute_psnr(original_image_np, reconstructed_image_np, data_range=255)
-            ssim_value = compute_ssim(original_image_np, reconstructed_image_np, win_size=7, channel_axis=-1, data_range=255)
-
-            # Display the reconstructed image
-            axes[i + 1].imshow(reconstructed_image_np)
-            axes[i + 1].set_title(f"SNR={snr}dB\nPSNR: {psnr_value:.2f}\n SSIM: {ssim_value:.3f}")
-            axes[i + 1].axis("off")
-
-        # Save the plot for this image
-        save_path = os.path.join(save_dir, f"random_image_{img_idx + 1}_snr_comparison.png")
+    if has_clip:
+        plt.figure(figsize=(8, 5))
+        plt.plot(snr_values, model_clip, marker="o", label="Model")
+        plt.plot(snr_values, baseline_clip, marker="o", label="BPG+LDPC")
+        plt.plot(snr_values, raw_bpg_clip, marker="o", label="BPG raw")
+        plt.xlabel("SNR (dB)")
+        plt.ylabel("Mean CLIP cosine")
+        plt.title("Mean CLIP Similarity vs SNR")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
         plt.tight_layout()
-        plt.savefig(save_path)
-        plt.show()
+        plt.savefig(clip_plot_path, bbox_inches="tight")
+        plt.close()
 
-        print(f"Visualization for image {img_idx + 1} saved to {save_path}")
+    if has_downstream:
+        plt.figure(figsize=(8, 5))
+        plt.plot(snr_values, original_acc, marker="o", label="Original")
+        plt.plot(snr_values, model_acc, marker="o", label="Model")
+        plt.plot(snr_values, baseline_acc, marker="o", label="BPG+LDPC")
+        plt.plot(snr_values, raw_bpg_acc, marker="o", label="BPG raw")
+        plt.xlabel("SNR (dB)")
+        plt.ylabel("Mean downstream accuracy")
+        plt.title("Mean Downstream Accuracy vs SNR")
+        plt.ylim(-0.05, 1.05)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(acc_plot_path, bbox_inches="tight")
+        plt.close()
+
+    return psnr_plot_path, ssim_plot_path, ber_plot_path, crc_plot_path, clip_plot_path, acc_plot_path
 
 
-def time_analysis(model):
-    print('Running inference time analysis')
-    input_shape = (64, 64, 3)  # Example input shape
-    avg_time = analysis_tools.evaluate_inference_time(model, input_shape)
-    print(f"Average Inference Time: {avg_time:.2f} ms")
-
-    input_shape = (64, 64, 3)  # Example input shape
-    avg_time_tf = analysis_tools.evaluate_inference_time_tf(model, input_shape)
-    print(f"Average Inference Time (TF Graph): {avg_time_tf:.2f} ms")
-    return True
-
-def compare_to_JPEG2000(model, test_ds, train_ds, config):
-    print('Comparing with JPEG2000 and generating example images...')
-    output_dir = "outputs/example_images/JPEG2000"
-    num_images = 8
+def save_reconstructions(model, test_ds, config):
+    num_images = getattr(config, "num_visual_eval_images", 8)
+    output_dir = getattr(config, "visual_eval_output_dir", "outputs/visual_eval")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Process and save images with BPG as the comparison format
-    results = image_proc.process_and_save_images(
-        test_ds, model, output_dir, config, config.bw_ratio, config.train_snrdB, config.mcs, 
-        comparison_format="JPEG2000", num_images=num_images, LDPCon=config.LDPCon
+    rows = []
+    saved = 0
+    clip_handle = _get_clip_handle(config)
+
+    for images, _ in test_ds:
+        predictions = model(images, training=False).numpy()
+        originals = _extract_images(images).numpy()
+
+        for idx in range(images.shape[0]):
+            if saved >= num_images:
+                break
+
+            original_u8 = _to_uint8_image(originals[idx])
+            reconstructed_u8 = _to_uint8_image(predictions[idx])
+
+            psnr_value, ssim_value = _compute_psnr_ssim(original_u8, reconstructed_u8)
+            clip_value = _compute_clip_similarity(originals[idx], predictions[idx], clip_handle)
+
+            image_id = saved + 1
+            original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
+            reconstructed_path = os.path.join(output_dir, f"image_{image_id:03d}_reconstructed.png")
+
+            _save_image(original_u8, original_path)
+            _save_image(reconstructed_u8, reconstructed_path)
+
+            rows.append({
+                "image_id": image_id,
+                "original_path": original_path,
+                "reconstructed_path": reconstructed_path,
+                "psnr": float(psnr_value),
+                "ssim": float(ssim_value),
+            })
+            if clip_value is not None:
+                rows[-1]["clip"] = clip_value
+            saved += 1
+
+        if saved >= num_images:
+            break
+
+    if not rows:
+        raise RuntimeError("No images were available from the test dataset.")
+
+    fieldnames = ["image_id", "original_path", "reconstructed_path", "psnr", "ssim"]
+    if clip_handle is not None:
+        fieldnames.append("clip")
+
+    metrics_path = os.path.join(output_dir, "metrics.tsv")
+    with open(metrics_path, "w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        summary_row = {
+            "image_id": "mean",
+            "original_path": "",
+            "reconstructed_path": "",
+            "psnr": float(np.mean([row["psnr"] for row in rows])),
+            "ssim": float(np.mean([row["ssim"] for row in rows])),
+        }
+        if clip_handle is not None:
+            summary_row["clip"] = float(np.mean([row["clip"] for row in rows]))
+        writer.writerow(summary_row)
+
+    print(f"Saved {len(rows)} original/reconstruction pairs to {output_dir}")
+    print(f"Saved PSNR/SSIM metrics to {metrics_path}")
+
+    return {
+        "output_dir": output_dir,
+        "metrics_path": metrics_path,
+    }
+
+
+def _channel_uses_for_model(model, sample_image):
+    latent = model.encoder(tf.expand_dims(sample_image, axis=0))
+    return int(latent.shape[1])
+
+
+def _max_bpg_payload_bytes(channel_uses, mcs):
+    k, n, m = mcs
+    bits_per_symbol = int(np.log2(m))
+    source_bits = channel_uses * bits_per_symbol * (k / n)
+    transport_bytes = max(1, int(source_bits // 8))
+    crc_bytes = 4
+    return max(1, transport_bytes - crc_bytes)
+
+
+def _max_raw_bpg_payload_bytes(channel_uses, m):
+    bits_per_symbol = int(np.log2(m))
+    payload_bits = channel_uses * bits_per_symbol
+    return max(1, int(payload_bits // 8))
+
+
+def _select_adaptive_mcs(config, snr_db):
+    adaptive_enabled = getattr(config, "adaptive_bpg_ldpc", False)
+    if not adaptive_enabled:
+        return config.mcs
+
+    mcs_table = getattr(config, "adaptive_mcs_table", None)
+    if not mcs_table:
+        return config.mcs
+
+    selected_mcs = tuple(mcs_table[0][1])
+    for snr_threshold, mcs in sorted(mcs_table, key=lambda item: float(item[0])):
+        if float(snr_db) >= float(snr_threshold):
+            selected_mcs = tuple(mcs)
+        else:
+            break
+
+    return selected_mcs
+
+
+def _run_bpg_ldpc_baseline(image_u8, channel_uses, snr_db, mcs, channel_type, rician_k_factor=2.0):
+    max_bytes = _max_bpg_payload_bytes(channel_uses, mcs)
+    k, n, m = mcs
+
+    encoder = analysis_tools.BPGEncoder()
+    decoder = analysis_tools.BPGDecoder(image_shape=image_u8.shape)
+    transmitter = analysis_tools.LDPCTransmitter(
+        k, n, m, snr_db, channel_type, rician_k_factor=rician_k_factor
     )
 
-    (original_images, processed_images, bpg_ldpc_images,
-     psnr_model_processed, psnr_bpg_ldpc,
-     ssim_model_processed, ssim_bpg_ldpc) = results
-    
-    avg_psnr_model = np.mean(psnr_model_processed)
-    avg_psnr_bpg = np.mean(psnr_bpg_ldpc)
-    avg_ssim_model = np.mean(ssim_model_processed)
-    avg_ssim_bpg = np.mean(ssim_bpg_ldpc)
+    payload_bits = encoder.encode(image_u8, max_bytes)
+    payload_bytes = np.packbits(payload_bits.astype(np.uint8)).tobytes()
+    framed_bytes = analysis_tools.append_crc32(payload_bytes)
+    framed_bits = np.unpackbits(np.frombuffer(framed_bytes, dtype=np.uint8)).astype(np.float32)
 
-    print(f"Average PSNR (Model Processed): {avg_psnr_model:.2f} dB")
-    print(f"Average PSNR (JPEG2000): {avg_psnr_bpg:.2f} dB")
-    print(f"Average SSIM (Model Processed): {avg_ssim_model:.4f}")
-    print(f"Average SSIM (JPEG2000: {avg_ssim_bpg:.4f}")
+    received_bits, tx_stats = transmitter.send_with_stats(framed_bits)
+    received_bytes = np.packbits(np.asarray(received_bits.numpy()).astype(np.uint8)).tobytes()
+    decoded_payload_bytes, crc_ok = analysis_tools.verify_and_strip_crc32(received_bytes)
 
-    # Visualize and save example images
-    output_path = "outputs/example_images/JPEG2000/visualization.png"
-    image_proc.visualize_and_save_images_with_comparison(
-    original_images=original_images, 
-    processed_images=processed_images, 
-    comparison_images=bpg_ldpc_images, 
-    psnr_model_processed=psnr_model_processed, 
-    psnr_comparison=psnr_bpg_ldpc, 
-    ssim_model_processed=ssim_model_processed, 
-    ssim_comparison=ssim_bpg_ldpc, 
-    output_path=output_path, 
-    comparison_type="JPEG2000",  
-    num_images=num_images  
-)
+    if crc_ok:
+        decoded_payload_bits = np.unpackbits(
+            np.frombuffer(decoded_payload_bytes, dtype=np.uint8)
+        ).astype(np.float32)
+    else:
+        decoded_payload_bits = np.zeros_like(payload_bits)
 
-    print(f'8 random images captured to /{output_dir}')
-    return True
+    decoded_image = decoder.decode(decoded_payload_bits, image_u8.shape, "bpg_ldpc_processed")
+    decoded_image = np.clip(np.asarray(decoded_image), 0, 255).astype(np.uint8)
+
+    return decoded_image, max_bytes, tx_stats["bit_error_rate"], crc_ok, mcs
+
+
+def _run_bpg_raw_baseline(image_u8, channel_uses, snr_db, mcs, channel_type, rician_k_factor=2.0):
+    _, _, m = mcs
+    max_bytes = _max_raw_bpg_payload_bytes(channel_uses, m)
+
+    encoder = analysis_tools.BPGEncoder()
+    decoder = analysis_tools.BPGDecoder(image_shape=image_u8.shape)
+    transmitter = analysis_tools.RawTransmitter(
+        m, snr_db, channel_type, rician_k_factor=rician_k_factor
+    )
+
+    payload_bits = encoder.encode(image_u8, max_bytes)
+    received_bits, tx_stats = transmitter.send_with_stats(payload_bits)
+    decoded_image = decoder.decode(received_bits.numpy(), image_u8.shape, "bpg_raw_processed")
+    decoded_image = np.clip(np.asarray(decoded_image), 0, 255).astype(np.uint8)
+
+    return decoded_image, max_bytes, tx_stats["bit_error_rate"], m
+
 
 def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
-    print("Comparing with BPG + LDPC and generating example images...")
-    output_dir = "outputs/example_images/BPG_LDPC"
-    num_images = 8
+    del train_ds
+
+    num_images = getattr(config, "num_visual_eval_images", 8)
+    output_dir = getattr(config, "bpg_ldpc_eval_output_dir", "outputs/bpg_ldpc_eval")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Process and save images with BPG as the comparison format
-    results = image_proc.process_and_save_images(
-        test_ds, model, output_dir, config, config.bw_ratio, config.train_snrdB, config.mcs, 
-        comparison_format="BPG", num_images=num_images, LDPCon=config.LDPCon
-    )
+    rows = []
+    saved = 0
+    channel_uses = None
+    clip_handle = _get_clip_handle(config)
+    downstream_classifier = _get_downstream_classifier(config)
+    labeled_images = None
+    labeled_targets = None
 
-    (original_images, processed_images, bpg_ldpc_images,
-     psnr_model_processed, psnr_bpg_ldpc,
-     ssim_model_processed, ssim_bpg_ldpc) = results
-    
-    avg_psnr_model = np.mean(psnr_model_processed)
-    avg_psnr_bpg = np.mean(psnr_bpg_ldpc)
-    avg_ssim_model = np.mean(ssim_model_processed)
-    avg_ssim_bpg = np.mean(ssim_bpg_ldpc)
+    if downstream_classifier is not None:
+        labeled_images, labeled_targets = _collect_eval_samples_with_labels(config, num_images)
+        if not labeled_images:
+            raise RuntimeError("No labeled evaluation images were available for downstream metrics.")
+        dataset_class_names = _dataset_class_names(config)
+        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
+        predictions = _model_predict(model, np.asarray(labeled_images, dtype=np.float32), snr_db=config.train_snrdB)
+        originals = np.asarray(labeled_images, dtype=np.float32)
+        channel_uses = _channel_uses_for_model(model, originals[0])
 
-    print(f"Average PSNR (Model Processed): {avg_psnr_model:.2f} dB")
-    print(f"Average PSNR (BPG+LDPC): {avg_psnr_bpg:.2f} dB")
-    print(f"Average SSIM (Model Processed): {avg_ssim_model:.4f}")
-    print(f"Average SSIM (BPG+LDPC): {avg_ssim_bpg:.4f}")
+    for images, _ in test_ds if downstream_classifier is None else []:
+        predictions = _model_predict(model, _extract_images(images), snr_db=config.train_snrdB)
+        originals = _extract_images(images).numpy()
 
-    # Visualize and save example images
-    output_path = "outputs/example_images/BPG_LDPC/visualization.png"
-    image_proc.visualize_and_save_images_with_comparison(
-    original_images=original_images, 
-    processed_images=processed_images, 
-    comparison_images=bpg_ldpc_images, 
-    psnr_model_processed=psnr_model_processed, 
-    psnr_comparison=psnr_bpg_ldpc, 
-    ssim_model_processed=ssim_model_processed, 
-    ssim_comparison=ssim_bpg_ldpc, 
-    output_path=output_path, 
-    comparison_type="BPG+LDPC",  
-    num_images=num_images  
-)
+        if channel_uses is None:
+            channel_uses = _channel_uses_for_model(model, originals[0])
 
-    print(f'8 random images captured to /{output_dir}')
-    return True
+        for idx in range(images.shape[0]):
+            if saved >= num_images:
+                break
+
+            original_u8 = _to_uint8_image(originals[idx])
+            reconstructed_u8 = _to_uint8_image(predictions[idx])
+            selected_mcs = _select_adaptive_mcs(config, config.train_snrdB)
+            baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
+                original_u8,
+                channel_uses=channel_uses,
+                snr_db=config.train_snrdB,
+                mcs=selected_mcs,
+                channel_type=config.channel_type,
+                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+            )
+            raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, raw_bpg_m = _run_bpg_raw_baseline(
+                original_u8,
+                channel_uses=channel_uses,
+                snr_db=config.train_snrdB,
+                mcs=selected_mcs,
+                channel_type=config.channel_type,
+                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+            )
+
+            image_id = saved + 1
+            original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
+            model_path = os.path.join(output_dir, f"image_{image_id:03d}_model.png")
+            baseline_path = os.path.join(output_dir, f"image_{image_id:03d}_bpg_ldpc.png")
+            raw_bpg_path = os.path.join(output_dir, f"image_{image_id:03d}_bpg_raw.png")
+
+            _save_image(original_u8, original_path)
+            _save_image(reconstructed_u8, model_path)
+            _save_image(baseline_u8, baseline_path)
+            _save_image(raw_bpg_u8, raw_bpg_path)
+
+            model_psnr, model_ssim = _compute_psnr_ssim(original_u8, reconstructed_u8)
+            baseline_psnr, baseline_ssim = _compute_psnr_ssim(original_u8, baseline_u8)
+            raw_bpg_psnr, raw_bpg_ssim = _compute_psnr_ssim(original_u8, raw_bpg_u8)
+            model_clip = _compute_clip_similarity(originals[idx], predictions[idx], clip_handle)
+            bpg_ldpc_clip = _compute_clip_similarity(originals[idx], baseline_u8.astype(np.float32) / 255.0, clip_handle)
+            bpg_raw_clip = _compute_clip_similarity(originals[idx], raw_bpg_u8.astype(np.float32) / 255.0, clip_handle)
+
+            mcs_k, mcs_n, mcs_m = selected_mcs
+            rows.append({
+                "image_id": image_id,
+                "channel_uses": channel_uses,
+                "bpg_max_bytes": max_bytes,
+                "bpg_ldpc_ber": bit_error_rate,
+                "bpg_ldpc_crc_ok": int(crc_ok),
+                "bpg_raw_max_bytes": raw_bpg_max_bytes,
+                "bpg_raw_ber": raw_bpg_ber,
+                "mcs_k": mcs_k,
+                "mcs_n": mcs_n,
+                "mcs_m": mcs_m,
+                "snr_db": config.train_snrdB,
+                "original_path": original_path,
+                "model_path": model_path,
+                "bpg_ldpc_path": baseline_path,
+                "bpg_raw_path": raw_bpg_path,
+                "model_psnr": float(model_psnr),
+                "model_ssim": float(model_ssim),
+                "bpg_ldpc_psnr": float(baseline_psnr),
+                "bpg_ldpc_ssim": float(baseline_ssim),
+                "bpg_raw_psnr": float(raw_bpg_psnr),
+                "bpg_raw_ssim": float(raw_bpg_ssim),
+            })
+            if clip_handle is not None:
+                rows[-1]["model_clip"] = model_clip
+                rows[-1]["bpg_ldpc_clip"] = bpg_ldpc_clip
+                rows[-1]["bpg_raw_clip"] = bpg_raw_clip
+            saved += 1
+
+        if saved >= num_images:
+            break
+
+    if not rows:
+        if downstream_classifier is not None:
+            for idx in range(len(originals)):
+                if saved >= num_images:
+                    break
+
+                original_u8 = _to_uint8_image(originals[idx])
+                reconstructed_u8 = _to_uint8_image(predictions[idx])
+                selected_mcs = _select_adaptive_mcs(config, config.train_snrdB)
+                baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
+                    original_u8,
+                    channel_uses=channel_uses,
+                    snr_db=config.train_snrdB,
+                    mcs=selected_mcs,
+                    channel_type=config.channel_type,
+                    rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+                )
+                raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, _ = _run_bpg_raw_baseline(
+                    original_u8,
+                    channel_uses=channel_uses,
+                    snr_db=config.train_snrdB,
+                    mcs=selected_mcs,
+                    channel_type=config.channel_type,
+                    rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+                )
+
+                image_id = saved + 1
+                original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
+                model_path = os.path.join(output_dir, f"image_{image_id:03d}_model.png")
+                baseline_path = os.path.join(output_dir, f"image_{image_id:03d}_bpg_ldpc.png")
+                raw_bpg_path = os.path.join(output_dir, f"image_{image_id:03d}_bpg_raw.png")
+
+                _save_image(original_u8, original_path)
+                _save_image(reconstructed_u8, model_path)
+                _save_image(baseline_u8, baseline_path)
+                _save_image(raw_bpg_u8, raw_bpg_path)
+
+                model_psnr, model_ssim = _compute_psnr_ssim(original_u8, reconstructed_u8)
+                baseline_psnr, baseline_ssim = _compute_psnr_ssim(original_u8, baseline_u8)
+                raw_bpg_psnr, raw_bpg_ssim = _compute_psnr_ssim(original_u8, raw_bpg_u8)
+                model_clip = _compute_clip_similarity(originals[idx], predictions[idx], clip_handle)
+                bpg_ldpc_clip = _compute_clip_similarity(originals[idx], baseline_u8.astype(np.float32) / 255.0, clip_handle)
+                bpg_raw_clip = _compute_clip_similarity(originals[idx], raw_bpg_u8.astype(np.float32) / 255.0, clip_handle)
+                model_pred, _ = downstream_classifier.predict(predictions[idx])
+                bpg_ldpc_pred, _ = downstream_classifier.predict(baseline_u8.astype(np.float32) / 255.0)
+                bpg_raw_pred, _ = downstream_classifier.predict(raw_bpg_u8.astype(np.float32) / 255.0)
+                original_pred, _ = downstream_classifier.predict(originals[idx])
+                target_model_label = label_mapping[labeled_targets[idx]]
+
+                mcs_k, mcs_n, mcs_m = selected_mcs
+                rows.append({
+                    "image_id": image_id,
+                    "channel_uses": channel_uses,
+                    "bpg_max_bytes": max_bytes,
+                    "bpg_ldpc_ber": bit_error_rate,
+                    "bpg_ldpc_crc_ok": int(crc_ok),
+                    "bpg_raw_max_bytes": raw_bpg_max_bytes,
+                    "bpg_raw_ber": raw_bpg_ber,
+                    "mcs_k": mcs_k,
+                    "mcs_n": mcs_n,
+                    "mcs_m": mcs_m,
+                    "snr_db": config.train_snrdB,
+                    "original_path": original_path,
+                    "model_path": model_path,
+                    "bpg_ldpc_path": baseline_path,
+                    "bpg_raw_path": raw_bpg_path,
+                    "model_psnr": float(model_psnr),
+                    "model_ssim": float(model_ssim),
+                    "bpg_ldpc_psnr": float(baseline_psnr),
+                    "bpg_ldpc_ssim": float(baseline_ssim),
+                    "bpg_raw_psnr": float(raw_bpg_psnr),
+                    "bpg_raw_ssim": float(raw_bpg_ssim),
+                    "target_label": labeled_targets[idx],
+                    "target_model_label": target_model_label,
+                    "original_pred": original_pred,
+                    "model_pred": model_pred,
+                    "bpg_ldpc_pred": bpg_ldpc_pred,
+                    "bpg_raw_pred": bpg_raw_pred,
+                    "model_acc": float(model_pred == target_model_label),
+                    "bpg_ldpc_acc": float(bpg_ldpc_pred == target_model_label),
+                    "bpg_raw_acc": float(bpg_raw_pred == target_model_label),
+                    "original_acc": float(original_pred == target_model_label),
+                })
+                if clip_handle is not None:
+                    rows[-1]["model_clip"] = model_clip
+                    rows[-1]["bpg_ldpc_clip"] = bpg_ldpc_clip
+                    rows[-1]["bpg_raw_clip"] = bpg_raw_clip
+                saved += 1
+        else:
+            raise RuntimeError("No images were available from the test dataset.")
+
+    metrics_path = os.path.join(output_dir, "metrics.tsv")
+    with open(metrics_path, "w", newline="") as handle:
+        fieldnames = [
+            "image_id",
+            "channel_uses",
+            "bpg_max_bytes",
+            "bpg_ldpc_ber",
+            "bpg_ldpc_crc_ok",
+            "bpg_raw_max_bytes",
+            "bpg_raw_ber",
+            "mcs_k",
+            "mcs_n",
+            "mcs_m",
+            "snr_db",
+            "original_path",
+            "model_path",
+            "bpg_ldpc_path",
+            "bpg_raw_path",
+            "model_psnr",
+            "model_ssim",
+            "bpg_ldpc_psnr",
+            "bpg_ldpc_ssim",
+            "bpg_raw_psnr",
+            "bpg_raw_ssim",
+        ]
+        if clip_handle is not None:
+            fieldnames.extend(["model_clip", "bpg_ldpc_clip", "bpg_raw_clip"])
+        if downstream_classifier is not None:
+            fieldnames.extend([
+                "target_label",
+                "original_pred",
+                "model_pred",
+                "bpg_ldpc_pred",
+                "bpg_raw_pred",
+                "original_acc",
+                "model_acc",
+                "bpg_ldpc_acc",
+                "bpg_raw_acc",
+            ])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+        summary_row = {
+            "image_id": "mean",
+            "channel_uses": channel_uses,
+            "bpg_max_bytes": float(np.mean([row["bpg_max_bytes"] for row in rows])),
+            "bpg_ldpc_ber": float(np.mean([row["bpg_ldpc_ber"] for row in rows])),
+            "bpg_ldpc_crc_ok": float(np.mean([row["bpg_ldpc_crc_ok"] for row in rows])),
+            "bpg_raw_max_bytes": float(np.mean([row["bpg_raw_max_bytes"] for row in rows])),
+            "bpg_raw_ber": float(np.mean([row["bpg_raw_ber"] for row in rows])),
+            "mcs_k": rows[0]["mcs_k"],
+            "mcs_n": rows[0]["mcs_n"],
+            "mcs_m": rows[0]["mcs_m"],
+            "snr_db": config.train_snrdB,
+            "original_path": "",
+            "model_path": "",
+            "bpg_ldpc_path": "",
+            "bpg_raw_path": "",
+            "model_psnr": float(np.mean([row["model_psnr"] for row in rows])),
+            "model_ssim": float(np.mean([row["model_ssim"] for row in rows])),
+            "bpg_ldpc_psnr": float(np.mean([row["bpg_ldpc_psnr"] for row in rows])),
+            "bpg_ldpc_ssim": float(np.mean([row["bpg_ldpc_ssim"] for row in rows])),
+            "bpg_raw_psnr": float(np.mean([row["bpg_raw_psnr"] for row in rows])),
+            "bpg_raw_ssim": float(np.mean([row["bpg_raw_ssim"] for row in rows])),
+        }
+        if clip_handle is not None:
+            summary_row["model_clip"] = float(np.mean([row["model_clip"] for row in rows]))
+            summary_row["bpg_ldpc_clip"] = float(np.mean([row["bpg_ldpc_clip"] for row in rows]))
+            summary_row["bpg_raw_clip"] = float(np.mean([row["bpg_raw_clip"] for row in rows]))
+        if downstream_classifier is not None:
+            summary_row["target_label"] = ""
+            summary_row["original_pred"] = ""
+            summary_row["model_pred"] = ""
+            summary_row["bpg_ldpc_pred"] = ""
+            summary_row["bpg_raw_pred"] = ""
+            summary_row["original_acc"] = float(np.mean([row["original_acc"] for row in rows]))
+            summary_row["model_acc"] = float(np.mean([row["model_acc"] for row in rows]))
+            summary_row["bpg_ldpc_acc"] = float(np.mean([row["bpg_ldpc_acc"] for row in rows]))
+            summary_row["bpg_raw_acc"] = float(np.mean([row["bpg_raw_acc"] for row in rows]))
+        writer.writerow(summary_row)
+
+    print(f"Saved {len(rows)} model/BPG+LDPC comparison triplets to {output_dir}")
+    print(f"Model channel uses per image: {channel_uses}")
+    print(f"Saved comparison metrics to {metrics_path}")
+
+    return {
+        "output_dir": output_dir,
+        "metrics_path": metrics_path,
+        "channel_uses": channel_uses,
+    }
 
 
-def compare_across_snr_range(model, test_ds, config):
-    print("Running SNR sweep: DeepJSCC vs BPG+LDPC vs BPG...")
-
+def compare_to_BPG_LDPC_sweep(model, test_ds, config):
+    num_images = getattr(config, "num_snr_eval_images", 8)
     output_dir = getattr(config, "snr_sweep_output_dir", "outputs/snr_sweep")
     os.makedirs(output_dir, exist_ok=True)
 
-    snr_min, snr_max = config.snr_range
-    snr_step = getattr(config, "snr_eval_step", 1)
-    num_eval_images = getattr(config, "num_snr_eval_images", 8)
-    snr_values = list(range(snr_min, snr_max + 1, snr_step))
-
-    eval_images = _collect_eval_images(test_ds, num_eval_images)
+    downstream_classifier = _get_downstream_classifier(config)
+    if downstream_classifier is not None:
+        eval_images, eval_labels = _collect_eval_samples_with_labels(config, num_images)
+        dataset_class_names = _dataset_class_names(config)
+        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
+    else:
+        eval_images = _collect_eval_images(test_ds, num_images)
+        eval_labels = None
     if not eval_images:
-        raise RuntimeError("No evaluation images found in the test dataset.")
+        raise RuntimeError("No images were available from the test dataset.")
 
-    summary_rows = []
+    channel_uses = _channel_uses_for_model(model, eval_images[0])
+    snr_step = getattr(config, "snr_eval_step", 1)
+    snr_values = _build_snr_values(config.snr_range, snr_step)
+    clip_handle = _get_clip_handle(config)
+
+    print(
+        "Running compare_to_BPG_LDPC_sweep "
+        f"from {snr_values[0]} to {snr_values[-1]} dB "
+        f"in steps of {snr_step} dB "
+        f"({len(snr_values)} SNR values total)."
+    )
+
     per_image_rows = []
+    summary_rows = []
 
-    first_original_path = os.path.join(output_dir, "original_sample.png")
-    Image.fromarray((eval_images[0] * 255).astype(np.uint8)).save(first_original_path)
+    for snr_db in snr_values:
+        print(f"Processing at {snr_db} SNR")
+        selected_mcs = _select_adaptive_mcs(config, snr_db)
+        mcs_k, mcs_n, mcs_m = selected_mcs
+        model_psnr_values = []
+        model_ssim_values = []
+        baseline_psnr_values = []
+        baseline_ssim_values = []
+        raw_bpg_psnr_values = []
+        raw_bpg_ssim_values = []
+        model_clip_values = []
+        bpg_ldpc_clip_values = []
+        bpg_raw_clip_values = []
+        original_acc_values = []
+        model_acc_values = []
+        bpg_ldpc_acc_values = []
+        bpg_raw_acc_values = []
 
-    for snr in snr_values:
-        print(f"Evaluating SNR={snr}dB on {len(eval_images)} images")
+        snr_dir = os.path.join(output_dir, f"snr_{snr_db}")
+        os.makedirs(snr_dir, exist_ok=True)
 
-        model_images, model_psnr, model_ssim = _evaluate_model_at_snr(model, eval_images, snr)
-        bpg_ldpc_images, bpg_ldpc_psnr, bpg_ldpc_ssim = _evaluate_bpg_baseline_at_snr(
-            eval_images, config, snr, output_dir, use_ldpc=True
-        )
-        bpg_images, bpg_psnr, bpg_ssim = _evaluate_bpg_baseline_at_snr(
-            eval_images, config, snr, output_dir, use_ldpc=False
-        )
+        for idx, image in enumerate(eval_images, start=1):
+            image_tensor = tf.expand_dims(image, axis=0)
+            model.channel.set_snr(snr_db)
+            reconstructed = _model_predict(model, image_tensor, snr_db=snr_db)[0]
 
-        model_sample_path = os.path.join(output_dir, f"model_sample_snr_{snr}.png")
-        Image.fromarray((np.clip(model_images[0], 0, 1) * 255).astype(np.uint8)).save(model_sample_path)
+            original_u8 = _to_uint8_image(image)
+            reconstructed_u8 = _to_uint8_image(reconstructed)
+            baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
+                original_u8,
+                channel_uses=channel_uses,
+                snr_db=snr_db,
+                mcs=selected_mcs,
+                channel_type=config.channel_type,
+                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+            )
+            raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, _ = _run_bpg_raw_baseline(
+                original_u8,
+                channel_uses=channel_uses,
+                snr_db=snr_db,
+                mcs=selected_mcs,
+                channel_type=config.channel_type,
+                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+            )
 
-        summary_rows.append({
-            "snr_db": snr,
-            "num_images": len(eval_images),
-            "model_psnr_mean": float(np.mean(model_psnr)),
-            "model_psnr_std": float(np.std(model_psnr)),
-            "model_ssim_mean": float(np.mean(model_ssim)),
-            "model_ssim_std": float(np.std(model_ssim)),
-            "bpg_ldpc_psnr_mean": float(np.mean(bpg_ldpc_psnr)),
-            "bpg_ldpc_psnr_std": float(np.std(bpg_ldpc_psnr)),
-            "bpg_ldpc_ssim_mean": float(np.mean(bpg_ldpc_ssim)),
-            "bpg_ldpc_ssim_std": float(np.std(bpg_ldpc_ssim)),
-            "bpg_psnr_mean": float(np.mean(bpg_psnr)),
-            "bpg_psnr_std": float(np.std(bpg_psnr)),
-            "bpg_ssim_mean": float(np.mean(bpg_ssim)),
-            "bpg_ssim_std": float(np.std(bpg_ssim)),
-        })
+            model_psnr, model_ssim = _compute_psnr_ssim(original_u8, reconstructed_u8)
+            baseline_psnr, baseline_ssim = _compute_psnr_ssim(original_u8, baseline_u8)
+            raw_bpg_psnr, raw_bpg_ssim = _compute_psnr_ssim(original_u8, raw_bpg_u8)
+            model_clip = _compute_clip_similarity(image, reconstructed, clip_handle)
+            bpg_ldpc_clip = _compute_clip_similarity(image, baseline_u8.astype(np.float32) / 255.0, clip_handle)
+            bpg_raw_clip = _compute_clip_similarity(image, raw_bpg_u8.astype(np.float32) / 255.0, clip_handle)
 
-        for idx in range(len(eval_images)):
+            model_psnr_values.append(model_psnr)
+            model_ssim_values.append(model_ssim)
+            baseline_psnr_values.append(baseline_psnr)
+            baseline_ssim_values.append(baseline_ssim)
+            raw_bpg_psnr_values.append(raw_bpg_psnr)
+            raw_bpg_ssim_values.append(raw_bpg_ssim)
+            if clip_handle is not None:
+                model_clip_values.append(model_clip)
+                bpg_ldpc_clip_values.append(bpg_ldpc_clip)
+                bpg_raw_clip_values.append(bpg_raw_clip)
+            if downstream_classifier is not None:
+                target_label = eval_labels[idx - 1]
+                target_model_label = label_mapping[target_label]
+                original_pred, _ = downstream_classifier.predict(image)
+                model_pred, _ = downstream_classifier.predict(reconstructed)
+                bpg_ldpc_pred, _ = downstream_classifier.predict(baseline_u8.astype(np.float32) / 255.0)
+                bpg_raw_pred, _ = downstream_classifier.predict(raw_bpg_u8.astype(np.float32) / 255.0)
+                original_acc = float(original_pred == target_model_label)
+                model_acc = float(model_pred == target_model_label)
+                bpg_ldpc_acc = float(bpg_ldpc_pred == target_model_label)
+                bpg_raw_acc = float(bpg_raw_pred == target_model_label)
+                original_acc_values.append(original_acc)
+                model_acc_values.append(model_acc)
+                bpg_ldpc_acc_values.append(bpg_ldpc_acc)
+                bpg_raw_acc_values.append(bpg_raw_acc)
+
+            original_path = os.path.join(snr_dir, f"image_{idx:03d}_original.png")
+            model_path = os.path.join(snr_dir, f"image_{idx:03d}_model.png")
+            baseline_path = os.path.join(snr_dir, f"image_{idx:03d}_bpg_ldpc.png")
+            raw_bpg_path = os.path.join(snr_dir, f"image_{idx:03d}_bpg_raw.png")
+
+            _save_image(original_u8, original_path)
+            _save_image(reconstructed_u8, model_path)
+            _save_image(baseline_u8, baseline_path)
+            _save_image(raw_bpg_u8, raw_bpg_path)
+
             per_image_rows.append({
-                "snr_db": snr,
-                "image_index": idx,
-                "model_psnr": float(model_psnr[idx]),
-                "model_ssim": float(model_ssim[idx]),
-                "bpg_ldpc_psnr": float(bpg_ldpc_psnr[idx]),
-                "bpg_ldpc_ssim": float(bpg_ldpc_ssim[idx]),
-                "bpg_psnr": float(bpg_psnr[idx]),
-                "bpg_ssim": float(bpg_ssim[idx]),
+                "snr_db": snr_db,
+                "image_id": idx,
+                "channel_uses": channel_uses,
+                "bpg_max_bytes": max_bytes,
+                "bpg_ldpc_ber": bit_error_rate,
+                "bpg_ldpc_crc_ok": int(crc_ok),
+                "bpg_raw_max_bytes": raw_bpg_max_bytes,
+                "bpg_raw_ber": raw_bpg_ber,
+                "mcs_k": mcs_k,
+                "mcs_n": mcs_n,
+                "mcs_m": mcs_m,
+                "original_path": original_path,
+                "model_path": model_path,
+                "bpg_ldpc_path": baseline_path,
+                "bpg_raw_path": raw_bpg_path,
+                "model_psnr": model_psnr,
+                "model_ssim": model_ssim,
+                "bpg_ldpc_psnr": baseline_psnr,
+                "bpg_ldpc_ssim": baseline_ssim,
+                "bpg_raw_psnr": raw_bpg_psnr,
+                "bpg_raw_ssim": raw_bpg_ssim,
             })
+            if clip_handle is not None:
+                per_image_rows[-1]["model_clip"] = model_clip
+                per_image_rows[-1]["bpg_ldpc_clip"] = bpg_ldpc_clip
+                per_image_rows[-1]["bpg_raw_clip"] = bpg_raw_clip
+            if downstream_classifier is not None:
+                per_image_rows[-1]["target_label"] = target_label
+                per_image_rows[-1]["target_model_label"] = target_model_label
+                per_image_rows[-1]["original_pred"] = original_pred
+                per_image_rows[-1]["model_pred"] = model_pred
+                per_image_rows[-1]["bpg_ldpc_pred"] = bpg_ldpc_pred
+                per_image_rows[-1]["bpg_raw_pred"] = bpg_raw_pred
+                per_image_rows[-1]["original_acc"] = original_acc
+                per_image_rows[-1]["model_acc"] = model_acc
+                per_image_rows[-1]["bpg_ldpc_acc"] = bpg_ldpc_acc
+                per_image_rows[-1]["bpg_raw_acc"] = bpg_raw_acc
 
-    summary_df = pd.DataFrame(summary_rows)
-    per_image_df = pd.DataFrame(per_image_rows)
+        summary_row = {
+            "snr_db": snr_db,
+            "num_images": len(eval_images),
+            "channel_uses": channel_uses,
+            "mcs_k": mcs_k,
+            "mcs_n": mcs_n,
+            "mcs_m": mcs_m,
+            "bpg_max_bytes_mean": float(np.mean([row["bpg_max_bytes"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_ldpc_ber_mean": float(np.mean([row["bpg_ldpc_ber"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_ldpc_ber_std": float(np.std([row["bpg_ldpc_ber"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_ldpc_crc_ok_mean": float(np.mean([row["bpg_ldpc_crc_ok"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_raw_max_bytes_mean": float(np.mean([row["bpg_raw_max_bytes"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_raw_ber_mean": float(np.mean([row["bpg_raw_ber"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "bpg_raw_ber_std": float(np.std([row["bpg_raw_ber"] for row in per_image_rows if row["snr_db"] == snr_db])),
+            "model_psnr_mean": float(np.mean(model_psnr_values)),
+            "model_psnr_std": float(np.std(model_psnr_values)),
+            "model_ssim_mean": float(np.mean(model_ssim_values)),
+            "model_ssim_std": float(np.std(model_ssim_values)),
+            "bpg_ldpc_psnr_mean": float(np.mean(baseline_psnr_values)),
+            "bpg_ldpc_psnr_std": float(np.std(baseline_psnr_values)),
+            "bpg_ldpc_ssim_mean": float(np.mean(baseline_ssim_values)),
+            "bpg_ldpc_ssim_std": float(np.std(baseline_ssim_values)),
+            "bpg_raw_psnr_mean": float(np.mean(raw_bpg_psnr_values)),
+            "bpg_raw_psnr_std": float(np.std(raw_bpg_psnr_values)),
+            "bpg_raw_ssim_mean": float(np.mean(raw_bpg_ssim_values)),
+            "bpg_raw_ssim_std": float(np.std(raw_bpg_ssim_values)),
+        }
+        if clip_handle is not None:
+            summary_row["model_clip_mean"] = float(np.mean(model_clip_values))
+            summary_row["model_clip_std"] = float(np.std(model_clip_values))
+            summary_row["bpg_ldpc_clip_mean"] = float(np.mean(bpg_ldpc_clip_values))
+            summary_row["bpg_ldpc_clip_std"] = float(np.std(bpg_ldpc_clip_values))
+            summary_row["bpg_raw_clip_mean"] = float(np.mean(bpg_raw_clip_values))
+            summary_row["bpg_raw_clip_std"] = float(np.std(bpg_raw_clip_values))
+        if downstream_classifier is not None:
+            summary_row["original_acc_mean"] = float(np.mean(original_acc_values))
+            summary_row["model_acc_mean"] = float(np.mean(model_acc_values))
+            summary_row["bpg_ldpc_acc_mean"] = float(np.mean(bpg_ldpc_acc_values))
+            summary_row["bpg_raw_acc_mean"] = float(np.mean(bpg_raw_acc_values))
+        summary_rows.append(summary_row)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    summary_csv = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_summary_{stamp}.csv")
-    per_image_csv = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_per_image_{stamp}.csv")
-    plot_path = os.path.join(output_dir, f"{config.experiment_name}_snr_sweep_{stamp}.png")
+    per_image_metrics_path = os.path.join(output_dir, "metrics_per_image.tsv")
+    summary_metrics_path = os.path.join(output_dir, "metrics_summary.tsv")
 
-    summary_df.to_csv(summary_csv, index=False)
-    per_image_df.to_csv(per_image_csv, index=False)
-    _write_snr_sweep_plot(summary_df, plot_path)
-
-    print(f"Saved SNR sweep summary to {summary_csv}")
-    print(f"Saved per-image SNR sweep data to {per_image_csv}")
-    print(f"Saved SNR sweep plot to {plot_path}")
-
-    return {
-        "summary_csv": summary_csv,
-        "per_image_csv": per_image_csv,
-        "plot_path": plot_path,
-    }
-
-#a collection of random little debugging tests. No code quality. May be broken
-def hacky_tests(model, test_ds, num_images=5, save_dir="outputs/sobel_testing/", threshold=False):
-    #visualise Soble
-
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Extract all images from the test dataset into a list
-    all_images = []
-    for images, _ in test_ds:
-        all_images.extend(images.numpy())  # Convert Tensors to NumPy arrays
-
-    # Select random images
-    selected_images = random.sample(all_images, num_images)
-
-    # Process and save Sobel edges for each image
-    for idx, image in enumerate(selected_images):
-        # Ensure the image has a batch dimension
-        image_tensor = tf.expand_dims(image, axis=0)
-
-        # Compute Sobel edges
-        sobel_edges = tf.image.sobel_edges(image_tensor)  # Shape: (batch, height, width, channels, 2)
-        grad_x = sobel_edges[..., 0]
-        grad_y = sobel_edges[..., 1]
-        edge_magnitude = tf.sqrt(tf.square(grad_x) + tf.square(grad_y))  # Compute edge magnitude
-
-        # Apply threshold if specified
-        if threshold is not None:
-            edge_magnitude = tf.where(edge_magnitude > threshold, edge_magnitude, 0.0)
-
-        # Remove batch and channel dimensions for visualization
-        edge_magnitude = tf.reduce_mean(edge_magnitude, axis=-1).numpy()  # Average across color channels
-        edge_magnitude = edge_magnitude[0]  # Remove batch dimension
-
-        # Save visualization
-        plt.figure(figsize=(8, 4))
-
-        # Original image
-        plt.subplot(1, 2, 1)
-        plt.imshow(image, cmap='gray')  # Assuming single image
-        plt.title('Original Image')
-        plt.axis('off')
-
-        # Edge map
-        plt.subplot(1, 2, 2)
-        plt.imshow(edge_magnitude, cmap='viridis')
-        plt.title('Sobel Edge Map' + (f' (Threshold={threshold})' if threshold else ''))
-        plt.axis('off')
-
-        plt.tight_layout()
-        output_path = os.path.join(save_dir, f"sobel_edge_image_{idx}.png")
-        plt.savefig(output_path)
-        plt.close()
-        print(f"Saved Sobel edge visualization to {output_path}")
-
-
-# tests.py (add near your other tests)
-import numpy as np
-import tensorflow as tf
-from utils.clip_metrics import CLIPHandle, clip_image_similarity, clip_zero_shot_label
-
-def compare_semantic_CLIP(model, test_ds, config, num_images=64, do_zeroshot=False):
-    """
-    Compute CLIP image-image cosine similarity between originals and reconstructions.
-    Optionally, compute zero-shot label agreement with CLIP if your dataset has class names.
-    """
-    print("Evaluating semantic fidelity with CLIP (image-image similarity)...")
-    handle = CLIPHandle(model_name=getattr(config, "clip_model_name", "ViT-B/32"))
-
-    sims = []
-    zs_agree = []
-    zs_details = []  # (orig_label, rec_label, agree, orig_conf, rec_conf)
-
-    images_seen = 0
-    # test_ds yields (image, label) with image in [0,1] thanks to your pipeline
-    for batch in test_ds:
-        imgs, labels = batch
-        imgs = imgs.numpy()
-
-        # forward through your model
-        preds = model(imgs, training=False).numpy()
-
-        for i in range(imgs.shape[0]):
-            if images_seen >= num_images:
-                break
-            orig = imgs[i]        # [0,1]
-            rec  = preds[i]       # [0,1]
-
-            sim = clip_image_similarity(orig, rec, handle)
-            sims.append(sim)
-
-            if do_zeroshot and hasattr(test_ds, "class_names"):
-                class_names = getattr(test_ds, "class_names", None)
-                if class_names:
-                    o_lbl, r_lbl, agree, o_conf, r_conf = clip_zero_shot_label(orig, rec, class_names, handle)
-                    zs_agree.append(1 if agree else 0)
-                    zs_details.append((o_lbl, r_lbl, agree, o_conf, r_conf))
-
-            images_seen += 1
-        if images_seen >= num_images:
-            break
-
-    sims = np.array(sims, dtype=np.float32)
-    mean_sim = float(sims.mean()) if len(sims) else float("nan")
-    std_sim  = float(sims.std()) if len(sims) else float("nan")
-    print(f"CLIP image-image cosine similarity: mean={mean_sim:.4f}  std={std_sim:.4f}  (1.0 is best)")
-
-    if do_zeroshot and len(zs_agree):
-        zs_agree = np.array(zs_agree, dtype=np.float32)
-        acc = float(zs_agree.mean())
-        print(f"Zero-shot label agreement (CLIP): {acc*100:.2f}%")
-    return {"mean_clip_sim": mean_sim, "std_clip_sim": std_sim, "zs_details": zs_details}
-
-def compare_semantic_CLIP_vs_BPG_LDPC(model, test_ds, config):
-    """
-    Compare semantic fidelity (CLIP cosine similarity) of:
-        - model reconstructions vs. originals
-        - BPG+LDPC reconstructions vs. originals
-    using the same images your PSNR/SSIM test uses.
-    """
-
-    num_images=config.num_semantic_eval_images
-    device=config.clip_device
-    clip_model_name=config.clip_model_name
-
-    print("Comparing semantic fidelity with CLIP: Model vs. BPG+LDPC ...")
-
-     # 1) Reuse your existing pipeline to get images & PSNR/SSIM (and save the images)
-    results = image_proc.process_and_save_images(
-        dataset=test_ds,
-        model=model,
-        output_dir="outputs/example_images/BPG_LDPC",
-        config=config,
-        bw_ratio=config.bw_ratio,
-        snrs=config.train_snrdB,
-        mcs=config.mcs,
-        comparison_format="BPG",
-        num_images=num_images,
-        LDPCon=getattr(config, "LDPCon", True),
-    )
-
-    (original_images, processed_images, bpg_ldpc_images,
-     psnr_model_processed, psnr_bpg_ldpc,
-     ssim_model_processed, ssim_bpg_ldpc) = results
-
-    # 2) Harmonize counts and types
-    N = min(len(original_images), len(processed_images), len(bpg_ldpc_images), num_images)
-    if N == 0:
-        raise RuntimeError("No images were produced by process_and_save_images; check dataset and num_images.")
-
-    original_images      = original_images[:N]                 # float [0,1]
-    processed_images     = processed_images[:N]                # float [0,1]
-    bpg_ldpc_images_u8   = bpg_ldpc_images[:N]                 # uint8
-    bpg_ldpc_images_f01  = [img.astype(np.float32) / 255.0 for img in bpg_ldpc_images_u8]
-
-    psnr_model_processed = psnr_model_processed[:N]
-    psnr_bpg_ldpc        = psnr_bpg_ldpc[:N]
-    ssim_model_processed = ssim_model_processed[:N]
-    ssim_bpg_ldpc        = ssim_bpg_ldpc[:N]
-
-    # 3) CLIP features & similarities
-    handle = CLIPHandle(
-        model_name=clip_model_name or getattr(config, "clip_model_name", "ViT-B/32"),
-        device=device or getattr(config, "clip_device", "cpu")
-    )
-    sims_model = clip_cosine_similarities(original_images,     processed_images,    handle, batch_size=32)
-    sims_bpg   = clip_cosine_similarities(original_images,     bpg_ldpc_images_f01, handle, batch_size=32)
-
-    mean_m, std_m = float(np.mean(sims_model)), float(np.std(sims_model))
-    mean_b, std_b = float(np.mean(sims_bpg)),   float(np.std(sims_bpg))
-    print(f"[CLIP cosine] Model: mean={mean_m:.4f} std={std_m:.4f}  |  BPG+LDPC: mean={mean_b:.4f} std={std_b:.4f}")
-
-    # Context: PSNR/SSIM
-    print(f"[PSNR]        Model: {np.mean(psnr_model_processed):.2f} dB  |  BPG+LDPC: {np.mean(psnr_bpg_ldpc):.2f} dB")
-    print(f"[SSIM]        Model: {np.mean(ssim_model_processed):.4f}   |  BPG+LDPC: {np.mean(ssim_bpg_ldpc):.4f}")
-
-    # 4) Visualization with CLIP overlays
-    os.makedirs("outputs/example_images/BPG_LDPC", exist_ok=True)
-    output_path = "outputs/example_images/BPG_LDPC/visualization_clip.png"
-    image_proc.visualize_and_save_images_with_comparison_and_clip(
-        original_images=original_images,
-        processed_images=processed_images,
-        comparison_images=bpg_ldpc_images_u8,   # uint8 is fine for imshow
-        psnr_model_processed=psnr_model_processed,
-        psnr_comparison=psnr_bpg_ldpc,
-        ssim_model_processed=ssim_model_processed,
-        ssim_comparison=ssim_bpg_ldpc,
-        clip_model_sims=sims_model,
-        clip_comparison_sims=sims_bpg,
-        output_path=output_path,
-        comparison_type="BPG+LDPC",
-        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
-    )
-    print(f"Saved visualization with CLIP overlays to {output_path}")
-
-    # 5) Save CSV with CLIP+PSNR+SSIM per image + aggregates
-    os.makedirs("logs", exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_csv = os.path.join("logs", f"{config.experiment_name}_clip_semantics_vs_bpg_{stamp}.csv")
-    with open(out_csv, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["index",
-                    "clip_sim_model", "clip_sim_bpg_ldpc",
-                    "psnr_model", "psnr_bpg", "ssim_model", "ssim_bpg"])
-        for i in range(N):
-            w.writerow([
-                i,
-                sims_model[i], sims_bpg[i],
-                psnr_model_processed[i], psnr_bpg_ldpc[i],
-                ssim_model_processed[i], ssim_bpg_ldpc[i],
+    with open(per_image_metrics_path, "w", newline="") as handle:
+        fieldnames = [
+            "snr_db",
+            "image_id",
+            "channel_uses",
+            "bpg_max_bytes",
+            "bpg_ldpc_ber",
+            "bpg_ldpc_crc_ok",
+            "bpg_raw_max_bytes",
+            "bpg_raw_ber",
+            "mcs_k",
+            "mcs_n",
+            "mcs_m",
+            "original_path",
+            "model_path",
+            "bpg_ldpc_path",
+            "bpg_raw_path",
+            "model_psnr",
+            "model_ssim",
+            "bpg_ldpc_psnr",
+            "bpg_ldpc_ssim",
+            "bpg_raw_psnr",
+            "bpg_raw_ssim",
+        ]
+        if clip_handle is not None:
+            fieldnames.extend(["model_clip", "bpg_ldpc_clip", "bpg_raw_clip"])
+        if downstream_classifier is not None:
+            fieldnames.extend([
+                "target_label",
+                "target_model_label",
+                "original_pred",
+                "model_pred",
+                "bpg_ldpc_pred",
+                "bpg_raw_pred",
+                "original_acc",
+                "model_acc",
+                "bpg_ldpc_acc",
+                "bpg_raw_acc",
             ])
-        w.writerow([])
-        w.writerow(["MEAN", mean_m, mean_b,
-                    float(np.mean(psnr_model_processed)), float(np.mean(psnr_bpg_ldpc)),
-                    float(np.mean(ssim_model_processed)), float(np.mean(ssim_bpg_ldpc))])
-        w.writerow(["STD", std_m, std_b,
-                    float(np.std(psnr_model_processed)), float(np.std(psnr_bpg_ldpc)),
-                    float(np.std(ssim_model_processed)), float(np.std(ssim_bpg_ldpc))])
-    print(f"Saved semantic comparison CSV to {out_csv}")
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(per_image_rows)
 
-    strip_path = "outputs/example_images/BPG_LDPC/visualization_strip.png"
-    image_proc.visualize_strip_with_titles_no_scores(
-        original_images=original_images,
-        processed_images=processed_images,
-        comparison_images=bpg_ldpc_images_u8,
-        output_path=strip_path,
-        row_labels=("Original image", "Proposed Technique", "BPG + LDPC"),
-        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
-    )
-    print(f"Saved horizontal strip to {strip_path}")
+    with open(summary_metrics_path, "w", newline="") as handle:
+        fieldnames = [
+            "snr_db",
+            "num_images",
+            "channel_uses",
+            "mcs_k",
+            "mcs_n",
+            "mcs_m",
+            "bpg_max_bytes_mean",
+            "bpg_ldpc_ber_mean",
+            "bpg_ldpc_ber_std",
+            "bpg_ldpc_crc_ok_mean",
+            "bpg_raw_max_bytes_mean",
+            "bpg_raw_ber_mean",
+            "bpg_raw_ber_std",
+            "model_psnr_mean",
+            "model_psnr_std",
+            "model_ssim_mean",
+            "model_ssim_std",
+            "bpg_ldpc_psnr_mean",
+            "bpg_ldpc_psnr_std",
+            "bpg_ldpc_ssim_mean",
+            "bpg_ldpc_ssim_std",
+            "bpg_raw_psnr_mean",
+            "bpg_raw_psnr_std",
+            "bpg_raw_ssim_mean",
+            "bpg_raw_ssim_std",
+        ]
+        if clip_handle is not None:
+            fieldnames.extend([
+                "model_clip_mean",
+                "model_clip_std",
+                "bpg_ldpc_clip_mean",
+                "bpg_ldpc_clip_std",
+                "bpg_raw_clip_mean",
+                "bpg_raw_clip_std",
+            ])
+        if downstream_classifier is not None:
+            fieldnames.extend([
+                "original_acc_mean",
+                "model_acc_mean",
+                "bpg_ldpc_acc_mean",
+                "bpg_raw_acc_mean",
+            ])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(summary_rows)
 
-    # ---- LaTeX table (adds CLIP rows) ----
-    latex_path = f"logs/{config.experiment_name}_metrics_clip_table.txt"
-    image_proc.export_latex_metrics_table_with_clip(
-        filepath=latex_path,
-        psnr_model=psnr_model_processed,
-        ssim_model=ssim_model_processed,
-        clip_model=sims_model,
-        psnr_comp=psnr_bpg_ldpc,
-        ssim_comp=ssim_bpg_ldpc,
-        clip_comp=sims_bpg,
-        comparison_title="BPG + LDPC",
-        proposed_title="Proposed technique",
-        col_width="1cm",
-        num_images=min(N, getattr(config, "num_semantic_eval_images", 8)),
-    )
-    print(f"Wrote LaTeX metrics table to {latex_path}")
+    psnr_plot_path, ssim_plot_path, ber_plot_path, crc_plot_path, clip_plot_path, acc_plot_path = _write_snr_summary_plots(summary_rows, output_dir)
+
+    print(f"Saved SNR sweep image triplets to {output_dir}")
+    print(f"Saved per-image SNR sweep metrics to {per_image_metrics_path}")
+    print(f"Saved summary SNR sweep metrics to {summary_metrics_path}")
+    print(f"Saved mean PSNR plot to {psnr_plot_path}")
+    print(f"Saved mean SSIM plot to {ssim_plot_path}")
+    print(f"Saved mean BER plot to {ber_plot_path}")
+    print(f"Saved mean CRC success plot to {crc_plot_path}")
+    if clip_plot_path is not None:
+        print(f"Saved mean CLIP plot to {clip_plot_path}")
+    if acc_plot_path is not None:
+        print(f"Saved mean downstream accuracy plot to {acc_plot_path}")
 
     return {
-        "clip_sim_model": sims_model,
-        "clip_sim_bpg": sims_bpg,
-        "mean_clip_model": mean_m,
-        "mean_clip_bpg": mean_b,
-        "std_clip_model": std_m,
-        "std_clip_bpg": std_b,
-        "csv": out_csv,
-        "viz": output_path,
+        "output_dir": output_dir,
+        "per_image_metrics_path": per_image_metrics_path,
+        "summary_metrics_path": summary_metrics_path,
+        "psnr_plot_path": psnr_plot_path,
+        "ssim_plot_path": ssim_plot_path,
+        "ber_plot_path": ber_plot_path,
+        "crc_plot_path": crc_plot_path,
+        "clip_plot_path": clip_plot_path,
+        "acc_plot_path": acc_plot_path,
+        "channel_uses": channel_uses,
     }

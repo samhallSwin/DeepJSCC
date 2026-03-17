@@ -1,13 +1,13 @@
 
-experiment_name = "lil_test" #effects file locations. Will overwrite previous with same name for the most part
+experiment_name = "film_test_20_Proper" #effects file locations. Will overwrite previous with same name for the most part
 workflow = "loadAndTest" #train, loadAndTest
 checkpoint_filepath = ""
 
-modelFile = 'big_model_mse_ssim_20.h5' #used for loading model for testing. Must be in /models/saved_models/
+modelFile = 'film_test_20_Proper_20.h5' #used for loading model for testing. Must be in /models/saved_models/
 
 #training params
 batch_size = 32
-epochs = 1
+epochs = 20
 train_snrdB = 10
 num_symbols = 512
 initial_epoch = 0
@@ -18,7 +18,12 @@ channel_filters = 32
 #Architecture params
 has_gdn = True
 channel_type = "AWGN" #Rayleigh, AWGN, Rician, None
+rician_k_factor = 2.0
 loss_func = 'combined_schedule' #mse, perceptual_loss, sobel_edge_loss, combined, gradient_loss, combined_loss_verbose, combined_schedule, ssim_loss
+use_snr_side_info = True
+film_hidden_units = 64
+random_snr_training = True
+train_snr_range = (-10.0, 10.0)
 
 #If loss_func=combined, set relative amounts here. Comment out unsused elements (ie. don't set them to zero)
 combined_loss_weights = {
@@ -42,33 +47,39 @@ loss_schedule = {
 LDPCon = True
 bw_ratio = 1 / 6
 mcs = (3072, 6144, 2)
+adaptive_bpg_ldpc = True
+adaptive_mcs_table = [
+    (-100, (3072, 6144, 2)),
+    (2, (3072, 4608, 2)),
+    (6, (3072, 4608, 4)),
+    (10, (1536, 4608, 4)),
+]
 
 #CLIP settings if running CLIP tests
+enable_clip_metric = True
 clip_device = "cpu" 
 clip_model_name = "ViT-B/32"
 num_semantic_eval_images = 8
 
+#Downstream task metric settings
+enable_downstream_metric = True
+downstream_model_id = "cm93/resnet18-eurosat"
+downstream_device = "cpu"
+
 #For processing for channel state est testing
-snr_range=(5, 15)
+snr_range=(-20, 10)
 snr_eval_step = 1
-num_snr_eval_images = 8
-snr_sweep_output_dir = "outputs/snr_sweep"
+num_snr_eval_images = 32
+snr_sweep_output_dir = "outputs/snr_sweep_rician_film3"
+num_visual_eval_images = 8
+visual_eval_output_dir = "outputs/visual_eval"
+bpg_ldpc_eval_output_dir = "outputs/bpg_ldpc_eval_film3"
 
 #add or remove tests (in tests.py) 
 # WARNING: Tests should work independantly but have not been properly tested running sequentially
 TESTS_TO_RUN = [
-    #"validate_model",
-    #"time_analysis",
-    "compare_to_BPG_LDPC",
-    #"compare_across_snr_range",
-    #"compare_to_JPEG2000",
-    #'process_All_SNR',
-    #'process_random_image_at_snrs',
-    #'process_images_through_channel',
-    #'save_latent',
-    #'compare_semantic_CLIP',
-    #'compare_semantic_CLIP_vs_BPG_LDPC',
-    #'hacky_tests',
+    #"compare_to_BPG_LDPC",
+    "compare_to_BPG_LDPC_sweep",
 ]
 
 #Must match entry in setImageParamsFromDataset()

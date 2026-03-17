@@ -61,7 +61,10 @@ def main():
             encoder_config=enc,
             decoder_config=dec,
             channel=config.channel_type,
-            debug_file=model_shape_file
+            debug_file=model_shape_file,
+            use_snr_side_info=config.use_snr_side_info,
+            film_hidden_units=config.film_hidden_units,
+            rician_k_factor=config.rician_k_factor,
         )
         
         if config.workflow == "train": 
@@ -143,8 +146,14 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
     if "save_latent" in config.TESTS_TO_RUN:
         tests.save_latent(model, test_ds, config)
 
+    if "save_reconstructions" in config.TESTS_TO_RUN:
+        tests.save_reconstructions(model, test_ds, config)
+
     if "compare_to_BPG_LDPC" in config.TESTS_TO_RUN:
         tests.compare_to_BPG_LDPC(model, test_ds, train_ds, config)
+
+    if "compare_to_BPG_LDPC_sweep" in config.TESTS_TO_RUN:
+        tests.compare_to_BPG_LDPC_sweep(model, test_ds, config)
 
     if "compare_to_JPEG2000" in config.TESTS_TO_RUN:
         tests.compare_to_JPEG2000(model, test_ds, train_ds, config)
@@ -322,6 +331,17 @@ def prepare_dataset(config):
     def normalize_and_augment(image, training):
         image = augment_layer(image, training=training)
         return image
+
+    def add_random_snr(images, targets):
+        snr_min, snr_max = config.train_snr_range
+        batch_size = tf.shape(images)[0]
+        snr = tf.random.uniform((batch_size,), minval=snr_min, maxval=snr_max, dtype=tf.float32)
+        return (images, snr), targets
+
+    def add_fixed_snr(images, targets):
+        batch_size = tf.shape(images)[0]
+        snr = tf.fill((batch_size,), tf.cast(config.train_snrdB, tf.float32))
+        return (images, snr), targets
     
     #shuffle, augment and discard labels to replace them with the image data for autoenc
     train_ds = (
@@ -337,6 +357,13 @@ def prepare_dataset(config):
             .cache()
             .prefetch(AUTO)
     )
+
+    if config.use_snr_side_info:
+        if config.random_snr_training:
+            train_ds = train_ds.map(add_random_snr, num_parallel_calls=AUTO)
+        else:
+            train_ds = train_ds.map(add_fixed_snr, num_parallel_calls=AUTO)
+        test_ds = test_ds.map(add_fixed_snr, num_parallel_calls=AUTO)
 
     return train_ds, test_ds
 

@@ -1,14 +1,29 @@
 import tensorflow as tf
 import random
 
+
+def _snr_db_to_linear(snrdB):
+    snrdB = tf.cast(snrdB, tf.float32)
+    return tf.pow(10.0, snrdB / 10.0)
+
+
+def _prepare_snr_for_batch(snrdB, batch_size):
+    snrdB = tf.cast(snrdB, tf.float32)
+    if snrdB.shape.rank == 0:
+        snrdB = tf.fill([batch_size], snrdB)
+    else:
+        snrdB = tf.reshape(snrdB, [batch_size])
+    return _snr_db_to_linear(snrdB)
+
 class RayleighChannel(tf.keras.layers.Layer):
     def __init__(self, snrdB=None, clip_snrdB=5):
         super().__init__()
+        self.default_snrdB = float(snrdB)
         self.snr = 10 ** (snrdB / 10) # in dB
         self.clip_snr = 10 ** (clip_snrdB / 10)
     
 
-    def call(self, x):
+    def call(self, x, snrdB=None):
         '''
         x: inputs with shape (b, c, 2)
            where last dimension denotes in-phase and quadrature-phase elements, respectively.
@@ -23,16 +38,19 @@ class RayleighChannel(tf.keras.layers.Layer):
         q = x[:,:,1]
 
         # power normalization
-        sig_power = tf.math.reduce_mean(i ** 2 + q ** 2)
+        batch_size = tf.shape(x)[0]
+        sig_power = tf.reduce_mean(i ** 2 + q ** 2, axis=1, keepdims=True)
+        sig_power = tf.reshape(sig_power, [batch_size, 1, 1])
         
         # batch-wise slow fading
         h = tf.random.normal(
-            (1, 1, 2),
+            (batch_size, 1, 2),
             mean=0,
             stddev=tf.math.sqrt(0.5)
         )
 
-        snr = self.snr
+        snr = _prepare_snr_for_batch(self.default_snrdB if snrdB is None else snrdB, batch_size)
+        snr = tf.reshape(snr, [batch_size, 1, 1])
 
         n = tf.random.normal(
             tf.shape(x),
@@ -49,14 +67,19 @@ class RayleighChannel(tf.keras.layers.Layer):
         config = super().get_config()
         return config
 
+    def set_snr(self, snrdB):
+        self.default_snrdB = float(snrdB)
+        self.snr = 10 ** (snrdB / 10)
+
 
 class AWGNChannel(tf.keras.layers.Layer):
     def __init__(self, snrdB=None):
         super().__init__()
+        self.default_snrdB = float(snrdB)
         self.set_snr(snrdB)
     
 
-    def call(self, x):
+    def call(self, x, snrdB=None):
         '''
         x: inputs with shape (b, c, 2)
            where last dimension denotes in-phase and quadrature-phase elements, respectively.
@@ -68,8 +91,11 @@ class AWGNChannel(tf.keras.layers.Layer):
         q = x[:,:,1]
 
         # power normalization
-        sig_power = tf.math.reduce_mean(i ** 2 + q ** 2)
-        snr = self.snr
+        batch_size = tf.shape(x)[0]
+        sig_power = tf.reduce_mean(i ** 2 + q ** 2, axis=1, keepdims=True)
+        sig_power = tf.reshape(sig_power, [batch_size, 1, 1])
+        snr = _prepare_snr_for_batch(self.default_snrdB if snrdB is None else snrdB, batch_size)
+        snr = tf.reshape(snr, [batch_size, 1, 1])
 
         n = tf.random.normal(
             tf.shape(x),
@@ -81,6 +107,7 @@ class AWGNChannel(tf.keras.layers.Layer):
         return y
     
     def set_snr(self, snrdB):
+        self.default_snrdB = float(snrdB)
         self.snr = 10 ** (snrdB / 10)  # Convert dB to linear scale
 
     def get_config(self):
@@ -91,11 +118,12 @@ class AWGNChannel(tf.keras.layers.Layer):
 class RicianChannel(tf.keras.layers.Layer):
     def __init__(self, snrdB=None, k=2):
         super().__init__()
+        self.default_snrdB = float(snrdB)
         self.snr = 10 ** (snrdB / 10) # in dB
         self.k = k
     
 
-    def call(self, x):
+    def call(self, x, snrdB=None):
         '''
         x: inputs with shape (b, c, 2)
            where last dimension denotes in-phase and quadrature-phase elements, respectively.
@@ -110,16 +138,19 @@ class RicianChannel(tf.keras.layers.Layer):
         q = x[:,:,1]
 
         # power normalization
-        sig_power = tf.math.reduce_mean(i ** 2 + q ** 2)
+        batch_size = tf.shape(x)[0]
+        sig_power = tf.reduce_mean(i ** 2 + q ** 2, axis=1, keepdims=True)
+        sig_power = tf.reshape(sig_power, [batch_size, 1, 1])
         
         # batch-wise slow fading
         h = tf.random.normal(
-            (1, 1, 2),
+            (batch_size, 1, 2),
             mean=0,
             stddev=tf.math.sqrt(0.5)
         )
 
-        snr = self.snr
+        snr = _prepare_snr_for_batch(self.default_snrdB if snrdB is None else snrdB, batch_size)
+        snr = tf.reshape(snr, [batch_size, 1, 1])
 
         n = tf.random.normal(
             tf.shape(x),
@@ -132,6 +163,10 @@ class RicianChannel(tf.keras.layers.Layer):
         yhat = tf.math.sqrt(1 / (1+k)) * h * x + tf.math.sqrt(k / (1+k)) * x + n
 
         return yhat
+
+    def set_snr(self, snrdB):
+        self.default_snrdB = float(snrdB)
+        self.snr = 10 ** (snrdB / 10)
     
 def compute_bandwidth_ratio(input_size, num_symbols):
     """
