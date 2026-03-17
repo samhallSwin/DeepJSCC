@@ -111,6 +111,48 @@ def _collect_eval_samples_with_labels(config, num_images):
     return images_out, labels_out
 
 
+def _collect_balanced_eval_samples(config, num_images):
+    labeled_ds = dataset_generator(config.test_dir, config, shuffle=False)
+
+    images_by_label = {}
+
+    for images, labels in labeled_ds:
+        images_np = images.numpy().astype(np.float32) / 255.0
+        labels_np = labels.numpy()
+        for image, label in zip(images_np, labels_np):
+            label = int(label)
+            images_by_label.setdefault(label, []).append(image)
+
+    if not images_by_label:
+        return [], []
+
+    selected_images = []
+    selected_labels = []
+    class_labels = sorted(images_by_label.keys())
+    class_offsets = {label: 0 for label in class_labels}
+
+    while len(selected_images) < num_images:
+        added_in_round = False
+        for label in class_labels:
+            offset = class_offsets[label]
+            class_images = images_by_label[label]
+            if offset >= len(class_images):
+                continue
+
+            selected_images.append(class_images[offset])
+            selected_labels.append(label)
+            class_offsets[label] += 1
+            added_in_round = True
+
+            if len(selected_images) >= num_images:
+                break
+
+        if not added_in_round:
+            break
+
+    return selected_images, selected_labels
+
+
 def _dataset_class_names(config):
     return sorted(
         entry
@@ -745,20 +787,29 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
 
 
 def compare_to_BPG_LDPC_sweep(model, test_ds, config):
+    del test_ds
+
     num_images = getattr(config, "num_snr_eval_images", 8)
     output_dir = getattr(config, "snr_sweep_output_dir", "outputs/snr_sweep")
     os.makedirs(output_dir, exist_ok=True)
 
-    downstream_classifier = _get_downstream_classifier(config)
-    if downstream_classifier is not None:
-        eval_images, eval_labels = _collect_eval_samples_with_labels(config, num_images)
-        dataset_class_names = _dataset_class_names(config)
-        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
-    else:
-        eval_images = _collect_eval_images(test_ds, num_images)
-        eval_labels = None
+    eval_images, eval_labels = _collect_balanced_eval_samples(config, num_images)
     if not eval_images:
         raise RuntimeError("No images were available from the test dataset.")
+
+    class_counts = {
+        label: eval_labels.count(label)
+        for label in sorted(set(eval_labels))
+    }
+    print(
+        "Selected balanced evaluation set with class counts: "
+        f"{class_counts}"
+    )
+
+    downstream_classifier = _get_downstream_classifier(config)
+    if downstream_classifier is not None:
+        dataset_class_names = _dataset_class_names(config)
+        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
 
     channel_uses = _channel_uses_for_model(model, eval_images[0])
     snr_step = getattr(config, "snr_eval_step", 1)
