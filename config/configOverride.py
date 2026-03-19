@@ -6,7 +6,6 @@ def parse_args():
     # Add arguments to override config.py
     parser.add_argument("-n", '--experiment_name', type=str, help='Name of the experiment')
     parser.add_argument("-p", '--checkpoint_filepath', type=str, help='Checkpoint file')
-    parser.add_argument("-w", '--workflow', type=str, choices=['train', 'loadAndTest'], help='Workflow type')
     parser.add_argument("-m", '--modelFile', type=str, help='File to load saved model')
     parser.add_argument("-b", '--batch_size', type=int, help='Batch size for training')
     parser.add_argument("-e", '--epochs', type=int, help='Number of epochs')
@@ -40,7 +39,6 @@ def override_config_with_args(config, args):
     Update config variables with command-line arguments.
     """
     if args.experiment_name: config.experiment_name = args.experiment_name
-    if args.workflow: config.workflow = args.workflow
     if args.modelFile: config.modelFile = args.modelFile
     if args.batch_size: config.batch_size = args.batch_size
     if args.epochs: config.epochs = args.epochs

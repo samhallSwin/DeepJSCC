@@ -29,7 +29,9 @@ The current codebase is centered around:
 
 ```text
 DeepJSCC/
-├── train.py                  Main entry point for training and evaluation
+├── train.py                  Training entry point
+├── load_and_test.py          Evaluation entry point for saved models
+├── common_runtime.py         Shared runtime, dataset, and compile helpers
 ├── tests.py                  Evaluation helpers and BPG/LDPC comparisons
 ├── config/
 │   ├── config.py             Default experiment configuration
@@ -98,7 +100,6 @@ If you need to create a train/test split for EuroSAT, [split_data.py](/home/sam/
 
 Default settings live in [config/config.py](/home/sam/git/DeepJSCC/config/config.py). The most important fields are:
 
-- `workflow`: `train` or `loadAndTest`
 - `dataset`
 - `experiment_name`
 - `modelFile`
@@ -115,7 +116,6 @@ Example override flags:
 
 ```bash
 python train.py \
-  --workflow train \
   --dataset eurosatrgb \
   --experiment_name eurosat_awgn_10db \
   --epochs 20 \
@@ -129,14 +129,13 @@ python train.py \
 Run training with:
 
 ```bash
-python train.py --workflow train
+python train.py
 ```
 
 Useful example:
 
 ```bash
 python train.py \
-  --workflow train \
   --dataset eurosatrgb \
   --experiment_name film_awgn_10db \
   --epochs 20 \
@@ -154,12 +153,10 @@ Training artifacts are written to:
 
 ## Loading a Trained Model and Running Evaluation
 
-Set `workflow = "loadAndTest"` in config or pass it on the command line:
+Use the dedicated evaluation entrypoint:
 
 ```bash
-python train.py \
-  --workflow loadAndTest \
-  --modelFile your_model_name.h5
+python load_and_test.py --modelFile your_model_name.h5
 ```
 
 Evaluation behavior is controlled by `TESTS_TO_RUN` in [config/config.py](/home/sam/git/DeepJSCC/config/config.py).
@@ -204,8 +201,7 @@ Relevant config fields:
 Example:
 
 ```bash
-python train.py \
-  --workflow loadAndTest \
+python load_and_test.py \
   --modelFile film_awgn_10db_20.h5 \
   --snr_range=-10,15 \
   --snr_eval_step 1 \
@@ -221,7 +217,6 @@ Enable it with:
 
 ```bash
 python train.py \
-  --workflow train \
   --use_snr_side_info \
   --film_hidden_units 64
 ```
@@ -230,7 +225,6 @@ To sample a random training SNR per image:
 
 ```bash
 python train.py \
-  --workflow train \
   --use_snr_side_info \
   --random_snr_training \
   --train_snr_range=-10,10
