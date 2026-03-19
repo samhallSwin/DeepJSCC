@@ -12,6 +12,13 @@ from utils import analysis_tools
 from utils.datasets import dataset_generator
 
 
+def _experiment_output_dir(config, test_name):
+    experiment_name = getattr(config, "experiment_name", "default_experiment")
+    output_dir = os.path.join("outputs", experiment_name, test_name)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
 def _to_uint8_image(image):
     image = np.asarray(image)
     if np.issubdtype(image.dtype, np.floating):
@@ -329,8 +336,7 @@ def _write_snr_summary_plots(summary_rows, output_dir):
 
 def save_reconstructions(model, test_ds, config):
     num_images = getattr(config, "num_visual_eval_images", 8)
-    output_dir = getattr(config, "visual_eval_output_dir", "outputs/visual_eval")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = _experiment_output_dir(config, "save_reconstructions")
 
     rows = []
     saved = 0
@@ -500,8 +506,7 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
     del train_ds
 
     num_images = getattr(config, "num_visual_eval_images", 8)
-    output_dir = getattr(config, "bpg_ldpc_eval_output_dir", "outputs/bpg_ldpc_eval")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = _experiment_output_dir(config, "compare_to_BPG_LDPC")
 
     rows = []
     saved = 0
@@ -790,8 +795,7 @@ def compare_to_BPG_LDPC_sweep(model, test_ds, config):
     del test_ds
 
     num_images = getattr(config, "num_snr_eval_images", 8)
-    output_dir = getattr(config, "snr_sweep_output_dir", "outputs/snr_sweep")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = _experiment_output_dir(config, "compare_to_BPG_LDPC_sweep")
 
     eval_images, eval_labels = _collect_balanced_eval_samples(config, num_images)
     if not eval_images:

@@ -85,10 +85,7 @@ downstream_device = "cpu"
 snr_range = (-20, 10)
 snr_eval_step = 1
 num_snr_eval_images = 32
-snr_sweep_output_dir = "outputs/snr_sweep_base2"
 num_visual_eval_images = 8
-visual_eval_output_dir = "outputs/visual_eval"
-bpg_ldpc_eval_output_dir = "outputs/bpg_ldpc_eval_film3"
 
 # test selection
 TESTS_TO_RUN = [

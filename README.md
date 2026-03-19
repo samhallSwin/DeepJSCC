@@ -190,13 +190,24 @@ Relevant config fields:
 - `snr_range`
 - `snr_eval_step`
 - `num_snr_eval_images`
-- `snr_sweep_output_dir`
 - `bw_ratio`
 - `mcs`
 - `adaptive_bpg_ldpc`
 - `adaptive_mcs_table`
 - `enable_clip_metric`
 - `enable_downstream_metric`
+
+Evaluation outputs are written automatically under:
+
+```text
+outputs/[experiment_name]/[test_name]/
+```
+
+For example:
+
+- `outputs/my_run/save_reconstructions/`
+- `outputs/my_run/compare_to_BPG_LDPC/`
+- `outputs/my_run/compare_to_BPG_LDPC_sweep/`
 
 Example:
 
@@ -205,8 +216,7 @@ python load_and_test.py \
   --modelFile film_awgn_10db_20.h5 \
   --snr_range=-10,15 \
   --snr_eval_step 1 \
-  --num_snr_eval_images 32 \
-  --snr_sweep_output_dir outputs/snr_sweep_run1
+  --num_snr_eval_images 32
 ```
 
 ## SNR Side Information
