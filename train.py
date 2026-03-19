@@ -140,12 +140,6 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
     compile_model(model)
 
 
-    if "validate_model" in config.TESTS_TO_RUN:
-        tests.validate_model(model, test_ds)
-    
-    if "save_latent" in config.TESTS_TO_RUN:
-        tests.save_latent(model, test_ds, config)
-
     if "save_reconstructions" in config.TESTS_TO_RUN:
         tests.save_reconstructions(model, test_ds, config)
 
@@ -154,34 +148,6 @@ def load_and_analyse(model, config, train_ds, test_ds, args):
 
     if "compare_to_BPG_LDPC_sweep" in config.TESTS_TO_RUN:
         tests.compare_to_BPG_LDPC_sweep(model, test_ds, config)
-
-    if "compare_to_JPEG2000" in config.TESTS_TO_RUN:
-        tests.compare_to_JPEG2000(model, test_ds, train_ds, config)
-
-    if "time_analysis" in config.TESTS_TO_RUN:
-        tests.time_analysis(model)
-
-    if "process_All_SNR" in config.TESTS_TO_RUN:
-        tests.process_All_SNR(model, test_ds, train_ds, config)
-
-    if "compare_across_snr_range" in config.TESTS_TO_RUN:
-        tests.compare_across_snr_range(model, test_ds, config)
-
-    if "process_images_through_channel" in config.TESTS_TO_RUN:
-        tests.process_images_through_channel(model, test_ds, config, num_images=8, snr_range=(-10, 20))
-    
-    if "process_random_image_at_snrs" in config.TESTS_TO_RUN:
-        tests.process_random_image_at_snrs(model, test_ds, num_images=5, snr_range=(-20, 20), step=5, save_dir="outputs/channel_state_est/")
-
-    if "hacky_tests" in config.TESTS_TO_RUN:
-        tests.hacky_tests(model, test_ds)
-
-    if "compare_semantic_CLIP" in config.TESTS_TO_RUN:
-        # set config.clip_model_name = "ViT-B/32" if you want to change it
-        tests.compare_semantic_CLIP(model, test_ds, config, num_images=64, do_zeroshot=False)
-
-    if "compare_semantic_CLIP_vs_BPG_LDPC" in config.TESTS_TO_RUN:
-        tests.compare_semantic_CLIP_vs_BPG_LDPC(model, test_ds, config)
 
 
 def compile_model(model):
