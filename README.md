@@ -56,6 +56,15 @@ DeepJSCC/
 - TensorFlow 2.14
 - CUDA-capable GPU recommended for training
 
+For OzSTAR GPU runs, this repo is currently aligned to:
+
+- TensorFlow `2.14.1`
+- `tensorflow_compression` `2.14.1`
+- CUDA `11.8`
+- cuDNN `8.7`
+
+This is intentional: `tensorflow_compression`'s full Python package is only available for TensorFlow 2.14.x in the current project setup, so the newer CUDA 12.6 / cuDNN 9.5 module combination in older job scripts is not a safe match.
+
 Install dependencies in a virtual environment:
 
 ```bash
@@ -65,9 +74,14 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Some evaluation features require extra heavyweight dependencies already listed in `requirements.txt`, notably:
+If you want the optional semantic/downstream evaluation features as well:
 
-- `sionna` for LDPC/channel baselines
+```bash
+pip install -r requirements-eval.txt
+```
+
+Optional extras include:
+
 - `clip` and `torch`-ecosystem packages for semantic metrics
 - `timm` for downstream classification metrics
 
