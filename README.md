@@ -272,3 +272,43 @@ python train.py \
 ## License
 
 This project is distributed under the terms in [LICENSE](/home/sam/git/DeepJSCC/LICENSE).
+
+## PatchDeepJSCC
+
+A new `PatchDeepJSCC` model family is available for larger images. It combines:
+- a low-resolution global branch for scene structure
+- a shared overlapping local patch branch for detail
+- overlap-aware blending plus an optional refinement head for final fusion
+
+Typical training example on xView2 with 512x512 crops:
+
+```bash
+python train.py \
+  --model_family patch_deepjscc \
+  --dataset xview2 \
+  --image_width 512 \
+  --image_height 512 \
+  --batch_size 2 \
+  --patch_size 128 \
+  --patch_stride 96 \
+  --global_downsample_size 128 \
+  --train_snrdB 10
+```
+
+Ablation examples:
+- disable the global branch with `--disable_global_branch`
+- disable the local branch with `--disable_local_branch`
+- disable refinement with `--disable_refinement`
+- switch branch outputs between `rgb` and `features` with `--global_branch_output` and `--local_branch_output`
+
+Evaluation uses the same entry point and can save intermediate global/local reconstructions when the patch model is active:
+
+```bash
+python load_and_test.py \
+  --model_family patch_deepjscc \
+  --dataset xview2 \
+  --image_width 1024 \
+  --image_height 1024 \
+  --batch_size 1 \
+  --modelFile your_patch_model.h5
+```

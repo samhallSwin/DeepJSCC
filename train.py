@@ -1,5 +1,7 @@
 import os
 
+import numpy as np
+
 from config import config
 from config import configOverride
 from common_runtime import LossWeightScheduler
@@ -20,19 +22,25 @@ def main():
         train_model(model, config, train_ds, test_ds, args)
 
 
+def _warmup_model(model, config):
+    input_shape = (1, config.image_width, config.image_height, config.image_channels)
+    dummy_input = np.zeros(input_shape, dtype=np.float32)
+    if getattr(model, "use_snr_side_info", False):
+        dummy_snr = np.full((1,), config.train_snrdB, dtype=np.float32)
+        model((dummy_input, dummy_snr), training=False)
+    else:
+        model(dummy_input, training=False)
+
+
 def train_model(model, config, train_ds, test_ds, args):
     compile_model(model, config)
-
-    model.build(
-        input_shape=(None, config.image_width, config.image_height, config.image_channels)
-    )
+    _warmup_model(model, config)
     model.summary()
 
     if args.checkpoint_filepath is not None:
         model.load_weights(args.checkpoint_filepath)
 
     save_ckpt = model_checkpoint(config)
-
     tensorboard = tensorboard_callback(config)
 
     if config.loss_func == "combined_schedule":

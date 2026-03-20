@@ -17,6 +17,7 @@ from models.loss_functions import (
     ssim_loss,
 )
 from models.model import deepJSCC
+from models.patch_model import PatchDeepJSCC
 from utils.datasets import dataset_generator
 
 
@@ -51,6 +52,33 @@ def initialize_run(config, args, save_settings=True):
 
 def build_model(config, model_shape_file):
     enc, dec = config.setArc()
+    if getattr(config, "model_family", "deepjscc") == "patch_deepjscc":
+        return PatchDeepJSCC(
+            global_downsample_size=config.global_downsample_size,
+            patch_size=config.patch_size,
+            patch_stride=config.patch_stride,
+            global_latent_channels=config.global_latent_channels,
+            local_latent_channels=config.local_latent_channels,
+            global_branch_filters=config.global_branch_filters,
+            local_branch_filters=config.local_branch_filters,
+            global_branch_output=config.global_branch_output,
+            local_branch_output=config.local_branch_output,
+            enable_global_branch=config.enable_global_branch,
+            enable_local_branch=config.enable_local_branch,
+            enable_refinement=config.enable_refinement,
+            refinement_filters=config.refinement_filters,
+            refinement_depth=config.refinement_depth,
+            overlap_power=config.overlap_power,
+            normalization_type=config.patch_normalization_type,
+            group_norm_groups=config.patch_group_norm_groups,
+            snrdB=config.train_snrdB,
+            channel=config.channel_type,
+            debug_file=model_shape_file,
+            use_snr_side_info=config.use_snr_side_info,
+            film_hidden_units=config.film_hidden_units,
+            rician_k_factor=config.rician_k_factor,
+        )
+
     return deepJSCC(
         input_size=config.image_width,
         has_gdn=config.has_gdn,
@@ -163,18 +191,23 @@ def check_gpu():
 
 def prepare_dataset(config):
     auto = tf.data.experimental.AUTOTUNE
-    test_ds = dataset_generator(config.test_dir, config)
-    train_ds = dataset_generator(config.train_dir, config).cache()
+    test_ds = dataset_generator(config.test_dir, config, shuffle=False)
+    train_ds = dataset_generator(config.train_dir, config)
 
-    class_names = test_ds.class_names
+    if getattr(config, "cache_train_dataset", True):
+        train_ds = train_ds.cache()
+    if getattr(config, "cache_test_dataset", True):
+        test_ds = test_ds.cache()
+
+    class_names = getattr(test_ds, "class_names", [])
     print(class_names)
 
     print(f"Length of dataset (batches) = {len(train_ds)}")
     for images, labels in train_ds.take(1):
-        print(f"Shape of dataset{images.shape}")
+        print(f"Shape of dataset {images.shape}")
         print(labels.shape)
 
-    if config.image_height == 28:
+    if config.image_height == 28 and not getattr(config, "allow_variable_image_size", False):
         train_ds = train_ds.map(pad_images)
         test_ds = test_ds.map(pad_images)
         config.image_width = 32
@@ -208,19 +241,17 @@ def prepare_dataset(config):
         return (images, snr), targets
 
     train_ds = (
-        train_ds.shuffle(50000, reshuffle_each_iteration=True)
-        .map(
+        train_ds.map(
             lambda x, y: (normalize_and_augment(x, training=True), y),
             num_parallel_calls=auto,
         )
-        .map(lambda x, _: (x, x))
+        .map(lambda x, _: (x, x), num_parallel_calls=auto)
         .prefetch(auto)
     )
 
     test_ds = (
-        test_ds.map(lambda x, y: (normalize(x), y))
-        .map(lambda x, _: (x, x))
-        .cache()
+        test_ds.map(lambda x, y: (normalize(x), y), num_parallel_calls=auto)
+        .map(lambda x, _: (x, x), num_parallel_calls=auto)
         .prefetch(auto)
     )
 
@@ -256,7 +287,8 @@ def save_config_to_file(config, filename):
 
 def display_image(dataset):
     for images, labels in dataset.take(1):
-        for i in range(9):
+        del labels
+        for i in range(min(9, images.shape[0])):
             example_image = images[i] * 255.0
             example_image = example_image.numpy().astype("uint8")
             img = Image.fromarray(example_image)

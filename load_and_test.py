@@ -19,11 +19,18 @@ def main():
         load_and_test_model(model, config, train_ds, test_ds)
 
 
-def load_and_test_model(model, config, train_ds, test_ds):
-    input_shape = (config.image_width, config.image_height, config.image_channels)
-    dummy_input = np.zeros((1, *input_shape))
-    model(dummy_input)
+def _warmup_model(model, config):
+    input_shape = (1, config.image_width, config.image_height, config.image_channels)
+    dummy_input = np.zeros(input_shape, dtype=np.float32)
+    if getattr(model, "use_snr_side_info", False):
+        dummy_snr = np.full((1,), config.train_snrdB, dtype=np.float32)
+        model((dummy_input, dummy_snr), training=False)
+    else:
+        model(dummy_input, training=False)
 
+
+def load_and_test_model(model, config, train_ds, test_ds):
+    _warmup_model(model, config)
     model.load_weights(f"models/saved_models/{config.modelFile}")
     model.summary()
     compile_model(model, config)

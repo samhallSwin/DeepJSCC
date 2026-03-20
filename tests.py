@@ -50,14 +50,32 @@ def _extract_images(batch_inputs):
     return batch_inputs
 
 
-def _model_predict(model, images, snr_db=None):
+def _prepare_model_inputs(model, images, snr_db=None):
     images = tf.convert_to_tensor(images, dtype=tf.float32)
     if getattr(model, "use_snr_side_info", False):
         if snr_db is None:
             snr_db = getattr(model, "default_snrdB", 0.0)
         snr_tensor = tf.fill((tf.shape(images)[0],), tf.cast(snr_db, tf.float32))
-        return model((images, snr_tensor), training=False).numpy()
-    return model(images, training=False).numpy()
+        return (images, snr_tensor)
+    return images
+
+
+def _model_predict(model, images, snr_db=None):
+    model_inputs = _prepare_model_inputs(model, images, snr_db=snr_db)
+    return model(model_inputs, training=False).numpy()
+
+
+def _model_predict_with_details(model, images, snr_db=None):
+    model_inputs = _prepare_model_inputs(model, images, snr_db=snr_db)
+    if hasattr(model, "reconstruct_with_details"):
+        predictions, details = model.reconstruct_with_details(model_inputs, training=False)
+        details = {
+            key: value.numpy() if tf.is_tensor(value) else value
+            for key, value in details.items()
+            if value is not None
+        }
+        return predictions.numpy(), details
+    return model(model_inputs, training=False).numpy(), {}
 
 
 def _get_clip_handle(config):
@@ -341,20 +359,29 @@ def save_reconstructions(model, test_ds, config):
     rows = []
     saved = 0
     clip_handle = _get_clip_handle(config)
+    save_patch_intermediates = getattr(config, "save_patch_intermediates", True)
 
     for images, _ in test_ds:
-        predictions = model(images, training=False).numpy()
         originals = _extract_images(images).numpy()
+        predictions, details = _model_predict_with_details(
+            model,
+            originals,
+            snr_db=getattr(config, "train_snrdB", None),
+        )
 
-        for idx in range(images.shape[0]):
+        global_predictions = details.get("global_reconstruction")
+        local_predictions = details.get("local_reconstruction")
+        final_predictions = details.get("final_reconstruction", predictions)
+
+        for idx in range(originals.shape[0]):
             if saved >= num_images:
                 break
 
             original_u8 = _to_uint8_image(originals[idx])
-            reconstructed_u8 = _to_uint8_image(predictions[idx])
+            reconstructed_u8 = _to_uint8_image(final_predictions[idx])
 
             psnr_value, ssim_value = _compute_psnr_ssim(original_u8, reconstructed_u8)
-            clip_value = _compute_clip_similarity(originals[idx], predictions[idx], clip_handle)
+            clip_value = _compute_clip_similarity(originals[idx], final_predictions[idx], clip_handle)
 
             image_id = saved + 1
             original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
@@ -363,15 +390,28 @@ def save_reconstructions(model, test_ds, config):
             _save_image(original_u8, original_path)
             _save_image(reconstructed_u8, reconstructed_path)
 
-            rows.append({
+            row = {
                 "image_id": image_id,
                 "original_path": original_path,
                 "reconstructed_path": reconstructed_path,
                 "psnr": float(psnr_value),
                 "ssim": float(ssim_value),
-            })
+            }
+
+            if save_patch_intermediates and global_predictions is not None:
+                global_path = os.path.join(output_dir, f"image_{image_id:03d}_global.png")
+                _save_image(global_predictions[idx], global_path)
+                row["global_path"] = global_path
+
+            if save_patch_intermediates and local_predictions is not None:
+                local_path = os.path.join(output_dir, f"image_{image_id:03d}_local.png")
+                _save_image(local_predictions[idx], local_path)
+                row["local_path"] = local_path
+
             if clip_value is not None:
-                rows[-1]["clip"] = clip_value
+                row["clip"] = clip_value
+
+            rows.append(row)
             saved += 1
 
         if saved >= num_images:
@@ -381,16 +421,16 @@ def save_reconstructions(model, test_ds, config):
         raise RuntimeError("No images were available from the test dataset.")
 
     fieldnames = ["image_id", "original_path", "reconstructed_path", "psnr", "ssim"]
+    if save_patch_intermediates and any("global_path" in row for row in rows):
+        fieldnames.append("global_path")
+    if save_patch_intermediates and any("local_path" in row for row in rows):
+        fieldnames.append("local_path")
     if clip_handle is not None:
         fieldnames.append("clip")
 
     metrics_path = os.path.join(output_dir, "metrics.tsv")
     with open(metrics_path, "w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=fieldnames,
-            delimiter="\t",
-        )
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="	")
         writer.writeheader()
         writer.writerows(rows)
         summary_row = {
@@ -400,6 +440,10 @@ def save_reconstructions(model, test_ds, config):
             "psnr": float(np.mean([row["psnr"] for row in rows])),
             "ssim": float(np.mean([row["ssim"] for row in rows])),
         }
+        if "global_path" in fieldnames:
+            summary_row["global_path"] = ""
+        if "local_path" in fieldnames:
+            summary_row["local_path"] = ""
         if clip_handle is not None:
             summary_row["clip"] = float(np.mean([row["clip"] for row in rows]))
         writer.writerow(summary_row)
@@ -414,7 +458,11 @@ def save_reconstructions(model, test_ds, config):
 
 
 def _channel_uses_for_model(model, sample_image):
-    latent = model.encoder(tf.expand_dims(sample_image, axis=0))
+    sample_batch = tf.expand_dims(sample_image, axis=0)
+    if hasattr(model, "reconstruct_with_details"):
+        _, details = model.reconstruct_with_details(sample_batch, training=False)
+        return int(details.get("channel_uses", 0))
+    latent = model.encoder(sample_batch)
     return int(latent.shape[1])
 
 
