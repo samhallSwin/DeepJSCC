@@ -3,7 +3,7 @@
 # [USED FOR BOTH TRAINING AND TESTING]
 # 
 # ###################################
-experiment_name = "split_test_smoke"  # Used in artifact/log file names.
+experiment_name = "split_test_smoke"  # Used in artifact/log file names. WHEN TESTING, MAKE SURE TO SET MODEL FILE BELOW CORRECTLY. There is no check to ensure this, so if you change this name, make sure to update the modelFile variable below to match the saved model you want to test.
 batch_size = 32
 train_snrdB = 10
 num_symbols = 512
@@ -53,10 +53,10 @@ loss_schedule = {
 
 # ###################################
 # 
-# [USED ONLY IN TRAIN.PY]
+# [USED ONLY IN LOAD_AND_TEST.PY]
 # 
 # ###################################
-modelFile = 'test_smoke.h5'  # Must be present in models/saved_models/.
+modelFile = 'split_test_smoke_1.h5'  # Must be present in models/saved_models/.
 
 # Testing-only baseline comparison settings
 LDPCon = True
