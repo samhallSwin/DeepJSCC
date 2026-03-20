@@ -494,7 +494,7 @@ class PatchDeepJSCC(tf.keras.Model):
         global_full_res, global_low_res, global_channel_uses = self._decode_global(images, snr_db, training=training)
         local_full_res, local_channel_uses = self._decode_local(images, snr_db, training=training)
 
-        fusion_inputs = [images]
+        fusion_inputs = []
         if global_full_res is not None:
             fusion_inputs.append(global_full_res)
         if local_full_res is not None:

@@ -33,6 +33,26 @@ def _save_image(image, filepath):
     Image.fromarray(_to_uint8_image(image)).save(filepath)
 
 
+def _image_range_stats(image):
+    image = np.asarray(image, dtype=np.float32)
+    return {
+        "min": float(np.min(image)),
+        "max": float(np.max(image)),
+        "mean": float(np.mean(image)),
+    }
+
+
+def _branch_fusion_preview(global_prediction=None, local_prediction=None):
+    branches = []
+    if global_prediction is not None:
+        branches.append(np.asarray(global_prediction, dtype=np.float32))
+    if local_prediction is not None:
+        branches.append(np.asarray(local_prediction, dtype=np.float32))
+    if not branches:
+        return None
+    return np.mean(np.stack(branches, axis=0), axis=0)
+
+
 def _compute_psnr_ssim(reference_u8, candidate_u8):
     psnr_value = peak_signal_noise_ratio(reference_u8, candidate_u8, data_range=255)
     ssim_value = structural_similarity(
@@ -125,7 +145,7 @@ def _collect_eval_samples_with_labels(config, num_images):
     labels_out = []
 
     for images, labels in labeled_ds:
-        images_np = images.numpy().astype(np.float32) / 255.0
+        images_np = images.numpy().astype(np.float32)
         labels_np = labels.numpy()
         for image, label in zip(images_np, labels_np):
             images_out.append(image)
@@ -142,7 +162,7 @@ def _collect_balanced_eval_samples(config, num_images):
     images_by_label = {}
 
     for images, labels in labeled_ds:
-        images_np = images.numpy().astype(np.float32) / 255.0
+        images_np = images.numpy().astype(np.float32)
         labels_np = labels.numpy()
         for image, label in zip(images_np, labels_np):
             label = int(label)
@@ -361,27 +381,50 @@ def save_reconstructions(model, test_ds, config):
     clip_handle = _get_clip_handle(config)
     save_patch_intermediates = getattr(config, "save_patch_intermediates", True)
 
-    for images, _ in test_ds:
-        originals = _extract_images(images).numpy()
+    for batch_index, (images, _) in enumerate(test_ds):
+        extracted_images = _extract_images(images).numpy()
+        originals = extracted_images.astype(np.float32).copy()
+        batch_input_stats = _image_range_stats(extracted_images)
+        batch_original_stats = _image_range_stats(originals)
         predictions, details = _model_predict_with_details(
             model,
             originals,
             snr_db=getattr(config, "train_snrdB", None),
         )
 
+        input_details = details.get("input")
+        if input_details is not None and np.shape(input_details) == np.shape(originals):
+            reference_images = np.asarray(input_details, dtype=np.float32).copy()
+        else:
+            reference_images = originals
+        batch_reference_stats = _image_range_stats(reference_images)
+
+        print(
+            f"[save_reconstructions] batch={batch_index} "
+            f"dataset(min={batch_input_stats['min']:.6f}, max={batch_input_stats['max']:.6f}, mean={batch_input_stats['mean']:.6f}) "
+            f"originals(min={batch_original_stats['min']:.6f}, max={batch_original_stats['max']:.6f}, mean={batch_original_stats['mean']:.6f}) "
+            f"reference(min={batch_reference_stats['min']:.6f}, max={batch_reference_stats['max']:.6f}, mean={batch_reference_stats['mean']:.6f})"
+        )
+
         global_predictions = details.get("global_reconstruction")
         local_predictions = details.get("local_reconstruction")
         final_predictions = details.get("final_reconstruction", predictions)
 
-        for idx in range(originals.shape[0]):
+        for idx in range(reference_images.shape[0]):
             if saved >= num_images:
                 break
 
-            original_u8 = _to_uint8_image(originals[idx])
+            branch_fusion = _branch_fusion_preview(
+                global_predictions[idx] if global_predictions is not None else None,
+                local_predictions[idx] if local_predictions is not None else None,
+            )
+            original_stats = _image_range_stats(reference_images[idx])
+            final_stats = _image_range_stats(final_predictions[idx])
+            original_u8 = _to_uint8_image(reference_images[idx])
             reconstructed_u8 = _to_uint8_image(final_predictions[idx])
 
             psnr_value, ssim_value = _compute_psnr_ssim(original_u8, reconstructed_u8)
-            clip_value = _compute_clip_similarity(originals[idx], final_predictions[idx], clip_handle)
+            clip_value = _compute_clip_similarity(reference_images[idx], final_predictions[idx], clip_handle)
 
             image_id = saved + 1
             original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
@@ -396,17 +439,49 @@ def save_reconstructions(model, test_ds, config):
                 "reconstructed_path": reconstructed_path,
                 "psnr": float(psnr_value),
                 "ssim": float(ssim_value),
+                "batch_input_min": batch_input_stats["min"],
+                "batch_input_max": batch_input_stats["max"],
+                "batch_input_mean": batch_input_stats["mean"],
+                "batch_original_min": batch_original_stats["min"],
+                "batch_original_max": batch_original_stats["max"],
+                "batch_original_mean": batch_original_stats["mean"],
+                "batch_reference_min": batch_reference_stats["min"],
+                "batch_reference_max": batch_reference_stats["max"],
+                "batch_reference_mean": batch_reference_stats["mean"],
+                "original_min": original_stats["min"],
+                "original_max": original_stats["max"],
+                "original_mean": original_stats["mean"],
+                "final_min": final_stats["min"],
+                "final_max": final_stats["max"],
+                "final_mean": final_stats["mean"],
             }
 
             if save_patch_intermediates and global_predictions is not None:
                 global_path = os.path.join(output_dir, f"image_{image_id:03d}_global.png")
                 _save_image(global_predictions[idx], global_path)
+                global_stats = _image_range_stats(global_predictions[idx])
                 row["global_path"] = global_path
+                row["global_min"] = global_stats["min"]
+                row["global_max"] = global_stats["max"]
+                row["global_mean"] = global_stats["mean"]
 
             if save_patch_intermediates and local_predictions is not None:
                 local_path = os.path.join(output_dir, f"image_{image_id:03d}_local.png")
                 _save_image(local_predictions[idx], local_path)
+                local_stats = _image_range_stats(local_predictions[idx])
                 row["local_path"] = local_path
+                row["local_min"] = local_stats["min"]
+                row["local_max"] = local_stats["max"]
+                row["local_mean"] = local_stats["mean"]
+
+            if save_patch_intermediates and branch_fusion is not None:
+                branch_fusion_path = os.path.join(output_dir, f"image_{image_id:03d}_branch_fusion.png")
+                _save_image(branch_fusion, branch_fusion_path)
+                branch_fusion_stats = _image_range_stats(branch_fusion)
+                row["branch_fusion_path"] = branch_fusion_path
+                row["branch_fusion_min"] = branch_fusion_stats["min"]
+                row["branch_fusion_max"] = branch_fusion_stats["max"]
+                row["branch_fusion_mean"] = branch_fusion_stats["mean"]
 
             if clip_value is not None:
                 row["clip"] = clip_value
@@ -420,11 +495,34 @@ def save_reconstructions(model, test_ds, config):
     if not rows:
         raise RuntimeError("No images were available from the test dataset.")
 
-    fieldnames = ["image_id", "original_path", "reconstructed_path", "psnr", "ssim"]
+    fieldnames = [
+        "image_id",
+        "original_path",
+        "reconstructed_path",
+        "psnr",
+        "ssim",
+        "batch_input_min",
+        "batch_input_max",
+        "batch_input_mean",
+        "batch_original_min",
+        "batch_original_max",
+        "batch_original_mean",
+        "batch_reference_min",
+        "batch_reference_max",
+        "batch_reference_mean",
+        "original_min",
+        "original_max",
+        "original_mean",
+        "final_min",
+        "final_max",
+        "final_mean",
+    ]
     if save_patch_intermediates and any("global_path" in row for row in rows):
-        fieldnames.append("global_path")
+        fieldnames.extend(["global_path", "global_min", "global_max", "global_mean"])
     if save_patch_intermediates and any("local_path" in row for row in rows):
-        fieldnames.append("local_path")
+        fieldnames.extend(["local_path", "local_min", "local_max", "local_mean"])
+    if save_patch_intermediates and any("branch_fusion_path" in row for row in rows):
+        fieldnames.extend(["branch_fusion_path", "branch_fusion_min", "branch_fusion_max", "branch_fusion_mean"])
     if clip_handle is not None:
         fieldnames.append("clip")
 

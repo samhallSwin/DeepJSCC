@@ -3,7 +3,7 @@
 # [USED FOR BOTH TRAINING AND TESTING]
 #
 # ###################################
-experiment_name = "Patch_tester"
+experiment_name = "Patch_tester_fixed2"
 batch_size = 1
 train_snrdB = 10
 num_symbols = 512
@@ -93,7 +93,7 @@ loss_schedule = {
 # [USED ONLY IN LOAD_AND_TEST.PY]
 #
 # ###################################
-modelFile = "split_test_smoke_1.h5"
+modelFile = "Patch_tester_fixed_1.h5"
 
 LDPCon = True
 bw_ratio = 1 / 6
@@ -126,7 +126,7 @@ num_visual_eval_images = 8
 TESTS_TO_RUN = [
     #"compare_to_BPG_LDPC",
     "save_reconstructions",
-    "compare_to_BPG_LDPC_sweep",
+    #"compare_to_BPG_LDPC_sweep",
 ]
 
 # ###################################

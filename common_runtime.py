@@ -216,10 +216,9 @@ def prepare_dataset(config):
             print(images.shape)
             print(labels.shape)
 
-    normalize = tf.keras.layers.Rescaling(1.0 / 255)
+    normalize = tf.keras.layers.Lambda(lambda x: x)
     augment_layer = tf.keras.Sequential(
         [
-            tf.keras.layers.Rescaling(1.0 / 255),
             tf.keras.layers.RandomFlip("horizontal"),
         ]
     )

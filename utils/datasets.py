@@ -159,9 +159,51 @@ def _apply_nodata_filter(image_paths, labels, params, split_name):
 
 
 def _decode_and_prepare_image(path, params, training=False):
-    image = tf.io.read_file(path)
-    image = tf.io.decode_image(image, channels=3, expand_animations=False)
+    image_bytes = tf.io.read_file(path)
+    lowercase_path = tf.strings.lower(path)
+
+    def _decode_png():
+        png_u8 = tf.io.decode_png(image_bytes, channels=3, dtype=tf.uint8)
+        png_u16 = tf.io.decode_png(image_bytes, channels=3, dtype=tf.uint16)
+        png_u8_as_u16 = tf.cast(png_u8, tf.uint16)
+        png_u8_promoted = png_u8_as_u16 * tf.constant(257, dtype=tf.uint16)
+        is_promoted_u8 = tf.reduce_all(tf.equal(png_u16, png_u8_promoted))
+        return tf.cond(is_promoted_u8, lambda: png_u8_as_u16, lambda: png_u16)
+
+    def _decode_jpeg():
+        return tf.cast(tf.io.decode_jpeg(image_bytes, channels=3), tf.uint16)
+
+    def _decode_bmp():
+        return tf.cast(tf.io.decode_bmp(image_bytes, channels=3), tf.uint16)
+
+    def _decode_fallback():
+        return tf.cast(tf.io.decode_image(image_bytes, channels=3, expand_animations=False), tf.uint16)
+
+    image = tf.case(
+        [
+            (tf.strings.regex_full_match(lowercase_path, r'.*\.png'), _decode_png),
+            (tf.strings.regex_full_match(lowercase_path, r'.*\.(jpg|jpeg)'), _decode_jpeg),
+            (tf.strings.regex_full_match(lowercase_path, r'.*\.bmp'), _decode_bmp),
+        ],
+        default=_decode_fallback,
+        exclusive=True,
+    )
+
+    source_dtype = image.dtype
     image = tf.cast(image, tf.float32)
+    if source_dtype == tf.uint8:
+        image = image / 255.0
+    elif source_dtype == tf.uint16:
+        scale = tf.cond(
+            tf.reduce_max(image) > 255.0,
+            lambda: tf.constant(65535.0, dtype=tf.float32),
+            lambda: tf.constant(255.0, dtype=tf.float32),
+        )
+        image = image / scale
+    else:
+        image = tf.image.convert_image_dtype(image, tf.float32)
+
+    image = tf.clip_by_value(image, 0.0, 1.0)
 
     target_height = int(params.image_height)
     target_width = int(params.image_width)
