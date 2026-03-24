@@ -64,6 +64,20 @@ def _compute_psnr_ssim(reference_u8, candidate_u8):
     return float(psnr_value), float(ssim_value)
 
 
+def _bits_per_pixel_from_channel_uses(channel_uses, config):
+    modulation_order = None
+    if hasattr(config, "mcs") and len(getattr(config, "mcs", ())) >= 3:
+        modulation_order = getattr(config, "mcs")[2]
+    if modulation_order is None or modulation_order <= 1:
+        return None
+
+    bits_per_symbol = float(np.log2(modulation_order))
+    image_area = float(getattr(config, "image_width", 0) * getattr(config, "image_height", 0))
+    if image_area <= 0:
+        return None
+    return float(channel_uses) * bits_per_symbol / image_area
+
+
 def _extract_images(batch_inputs):
     if isinstance(batch_inputs, (tuple, list)):
         return batch_inputs[0]
@@ -83,6 +97,19 @@ def _prepare_model_inputs(model, images, snr_db=None):
 def _model_predict(model, images, snr_db=None):
     model_inputs = _prepare_model_inputs(model, images, snr_db=snr_db)
     return model(model_inputs, training=False).numpy()
+
+
+def _model_predict_batched(model, images, snr_db=None, batch_size=1):
+    images = np.asarray(images, dtype=np.float32)
+    if images.shape[0] == 0:
+        return images
+
+    outputs = []
+    batch_size = max(1, int(batch_size))
+    for start in range(0, images.shape[0], batch_size):
+        end = min(start + batch_size, images.shape[0])
+        outputs.append(_model_predict(model, images[start:end], snr_db=snr_db))
+    return np.concatenate(outputs, axis=0)
 
 
 def _model_predict_with_details(model, images, snr_db=None):
@@ -237,6 +264,31 @@ def _get_downstream_classifier(config):
         model_id=getattr(config, "downstream_model_id", "cm93/resnet18-eurosat"),
         device=getattr(config, "downstream_device", "cpu"),
     )
+
+
+def _prepare_downstream_label_mapping(config, downstream_classifier):
+    if downstream_classifier is None:
+        return None, None
+
+    dataset_class_names = _dataset_class_names(config)
+    if not dataset_class_names:
+        print("Skipping downstream metrics: dataset has no class-subdirectory labels.")
+        return None, None
+
+    if not getattr(downstream_classifier, "label_names", None):
+        print("Skipping downstream metrics: downstream classifier does not expose label names.")
+        return None, None
+
+    missing_names = [name for name in dataset_class_names if name not in downstream_classifier.label_names]
+    if missing_names:
+        print(
+            "Skipping downstream metrics: dataset class names are not present in the downstream model label space: "
+            f"{missing_names}"
+        )
+        return None, None
+
+    label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
+    return downstream_classifier, label_mapping
 
 
 def _build_snr_values(snr_range, snr_step):
@@ -409,6 +461,7 @@ def save_reconstructions(model, test_ds, config):
         global_predictions = details.get("global_reconstruction")
         local_predictions = details.get("local_reconstruction")
         final_predictions = details.get("final_reconstruction", predictions)
+        channel_uses = int(details.get("channel_uses", 0))
 
         for idx in range(reference_images.shape[0]):
             if saved >= num_images:
@@ -437,6 +490,7 @@ def save_reconstructions(model, test_ds, config):
                 "image_id": image_id,
                 "original_path": original_path,
                 "reconstructed_path": reconstructed_path,
+                "channel_uses": channel_uses,
                 "psnr": float(psnr_value),
                 "ssim": float(ssim_value),
                 "batch_input_min": batch_input_stats["min"],
@@ -499,6 +553,7 @@ def save_reconstructions(model, test_ds, config):
         "image_id",
         "original_path",
         "reconstructed_path",
+        "channel_uses",
         "psnr",
         "ssim",
         "batch_input_min",
@@ -535,6 +590,7 @@ def save_reconstructions(model, test_ds, config):
             "image_id": "mean",
             "original_path": "",
             "reconstructed_path": "",
+            "channel_uses": float(np.mean([row["channel_uses"] for row in rows])),
             "psnr": float(np.mean([row["psnr"] for row in rows])),
             "ssim": float(np.mean([row["ssim"] for row in rows])),
         }
@@ -546,7 +602,15 @@ def save_reconstructions(model, test_ds, config):
             summary_row["clip"] = float(np.mean([row["clip"] for row in rows]))
         writer.writerow(summary_row)
 
+    mean_channel_uses = float(np.mean([row["channel_uses"] for row in rows]))
+    mean_psnr = float(np.mean([row["psnr"] for row in rows]))
+    mean_ssim = float(np.mean([row["ssim"] for row in rows]))
+    mean_bpp = _bits_per_pixel_from_channel_uses(mean_channel_uses, config)
     print(f"Saved {len(rows)} original/reconstruction pairs to {output_dir}")
+    print(f"Mean channel uses per image: {mean_channel_uses:.2f}")
+    if mean_bpp is not None:
+        print(f"Implied channel budget: {mean_bpp:.4f} bits/pixel")
+    print(f"Mean PSNR/SSIM: {mean_psnr:.4f} dB / {mean_ssim:.6f}")
     print(f"Saved PSNR/SSIM metrics to {metrics_path}")
 
     return {
@@ -648,6 +712,44 @@ def _run_bpg_raw_baseline(image_u8, channel_uses, snr_db, mcs, channel_type, ric
     return decoded_image, max_bytes, tx_stats["bit_error_rate"], m
 
 
+def _run_matched_budget_baselines(model, sample_image, snr_db, config, image_u8=None):
+    sample_image = np.asarray(sample_image, dtype=np.float32)
+    if image_u8 is None:
+        image_u8 = _to_uint8_image(sample_image)
+
+    channel_uses = _channel_uses_for_model(model, sample_image)
+    selected_mcs = _select_adaptive_mcs(config, snr_db)
+    baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
+        image_u8,
+        channel_uses=channel_uses,
+        snr_db=snr_db,
+        mcs=selected_mcs,
+        channel_type=config.channel_type,
+        rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+    )
+    raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, raw_bpg_m = _run_bpg_raw_baseline(
+        image_u8,
+        channel_uses=channel_uses,
+        snr_db=snr_db,
+        mcs=selected_mcs,
+        channel_type=config.channel_type,
+        rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+    )
+
+    return {
+        "channel_uses": channel_uses,
+        "selected_mcs": selected_mcs,
+        "bpg_ldpc_image": baseline_u8,
+        "bpg_ldpc_max_bytes": max_bytes,
+        "bpg_ldpc_ber": bit_error_rate,
+        "bpg_ldpc_crc_ok": crc_ok,
+        "bpg_raw_image": raw_bpg_u8,
+        "bpg_raw_max_bytes": raw_bpg_max_bytes,
+        "bpg_raw_ber": raw_bpg_ber,
+        "bpg_raw_m": raw_bpg_m,
+    }
+
+
 def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
     del train_ds
 
@@ -659,6 +761,7 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
     channel_uses = None
     clip_handle = _get_clip_handle(config)
     downstream_classifier = _get_downstream_classifier(config)
+    downstream_classifier, label_mapping = _prepare_downstream_label_mapping(config, downstream_classifier)
     labeled_images = None
     labeled_targets = None
 
@@ -666,10 +769,14 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
         labeled_images, labeled_targets = _collect_eval_samples_with_labels(config, num_images)
         if not labeled_images:
             raise RuntimeError("No labeled evaluation images were available for downstream metrics.")
-        dataset_class_names = _dataset_class_names(config)
-        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
-        predictions = _model_predict(model, np.asarray(labeled_images, dtype=np.float32), snr_db=config.train_snrdB)
         originals = np.asarray(labeled_images, dtype=np.float32)
+        eval_batch_size = int(getattr(config, "eval_model_batch_size", 1))
+        predictions = _model_predict_batched(
+            model,
+            originals,
+            snr_db=config.train_snrdB,
+            batch_size=eval_batch_size,
+        )
         channel_uses = _channel_uses_for_model(model, originals[0])
 
     for images, _ in test_ds if downstream_classifier is None else []:
@@ -685,23 +792,23 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
 
             original_u8 = _to_uint8_image(originals[idx])
             reconstructed_u8 = _to_uint8_image(predictions[idx])
-            selected_mcs = _select_adaptive_mcs(config, config.train_snrdB)
-            baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
-                original_u8,
-                channel_uses=channel_uses,
+            matched_budget = _run_matched_budget_baselines(
+                model,
+                originals[idx],
                 snr_db=config.train_snrdB,
-                mcs=selected_mcs,
-                channel_type=config.channel_type,
-                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+                config=config,
+                image_u8=original_u8,
             )
-            raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, raw_bpg_m = _run_bpg_raw_baseline(
-                original_u8,
-                channel_uses=channel_uses,
-                snr_db=config.train_snrdB,
-                mcs=selected_mcs,
-                channel_type=config.channel_type,
-                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
-            )
+            channel_uses = matched_budget["channel_uses"]
+            selected_mcs = matched_budget["selected_mcs"]
+            baseline_u8 = matched_budget["bpg_ldpc_image"]
+            max_bytes = matched_budget["bpg_ldpc_max_bytes"]
+            bit_error_rate = matched_budget["bpg_ldpc_ber"]
+            crc_ok = matched_budget["bpg_ldpc_crc_ok"]
+            raw_bpg_u8 = matched_budget["bpg_raw_image"]
+            raw_bpg_max_bytes = matched_budget["bpg_raw_max_bytes"]
+            raw_bpg_ber = matched_budget["bpg_raw_ber"]
+            raw_bpg_m = matched_budget["bpg_raw_m"]
 
             image_id = saved + 1
             original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
@@ -762,23 +869,22 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
 
                 original_u8 = _to_uint8_image(originals[idx])
                 reconstructed_u8 = _to_uint8_image(predictions[idx])
-                selected_mcs = _select_adaptive_mcs(config, config.train_snrdB)
-                baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
-                    original_u8,
-                    channel_uses=channel_uses,
+                matched_budget = _run_matched_budget_baselines(
+                    model,
+                    originals[idx],
                     snr_db=config.train_snrdB,
-                    mcs=selected_mcs,
-                    channel_type=config.channel_type,
-                    rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+                    config=config,
+                    image_u8=original_u8,
                 )
-                raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, _ = _run_bpg_raw_baseline(
-                    original_u8,
-                    channel_uses=channel_uses,
-                    snr_db=config.train_snrdB,
-                    mcs=selected_mcs,
-                    channel_type=config.channel_type,
-                    rician_k_factor=getattr(config, "rician_k_factor", 2.0),
-                )
+                channel_uses = matched_budget["channel_uses"]
+                selected_mcs = matched_budget["selected_mcs"]
+                baseline_u8 = matched_budget["bpg_ldpc_image"]
+                max_bytes = matched_budget["bpg_ldpc_max_bytes"]
+                bit_error_rate = matched_budget["bpg_ldpc_ber"]
+                crc_ok = matched_budget["bpg_ldpc_crc_ok"]
+                raw_bpg_u8 = matched_budget["bpg_raw_image"]
+                raw_bpg_max_bytes = matched_budget["bpg_raw_max_bytes"]
+                raw_bpg_ber = matched_budget["bpg_raw_ber"]
 
                 image_id = saved + 1
                 original_path = os.path.join(output_dir, f"image_{image_id:03d}_original.png")
@@ -957,11 +1063,9 @@ def compare_to_BPG_LDPC_sweep(model, test_ds, config):
     )
 
     downstream_classifier = _get_downstream_classifier(config)
-    if downstream_classifier is not None:
-        dataset_class_names = _dataset_class_names(config)
-        label_mapping = {idx: downstream_classifier.label_names.index(name) for idx, name in enumerate(dataset_class_names)}
+    downstream_classifier, label_mapping = _prepare_downstream_label_mapping(config, downstream_classifier)
 
-    channel_uses = _channel_uses_for_model(model, eval_images[0])
+    channel_uses = None
     snr_step = getattr(config, "snr_eval_step", 1)
     snr_values = _build_snr_values(config.snr_range, snr_step)
     clip_handle = _get_clip_handle(config)
@@ -1004,22 +1108,23 @@ def compare_to_BPG_LDPC_sweep(model, test_ds, config):
 
             original_u8 = _to_uint8_image(image)
             reconstructed_u8 = _to_uint8_image(reconstructed)
-            baseline_u8, max_bytes, bit_error_rate, crc_ok, _ = _run_bpg_ldpc_baseline(
-                original_u8,
-                channel_uses=channel_uses,
+            matched_budget = _run_matched_budget_baselines(
+                model,
+                image,
                 snr_db=snr_db,
-                mcs=selected_mcs,
-                channel_type=config.channel_type,
-                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
+                config=config,
+                image_u8=original_u8,
             )
-            raw_bpg_u8, raw_bpg_max_bytes, raw_bpg_ber, _ = _run_bpg_raw_baseline(
-                original_u8,
-                channel_uses=channel_uses,
-                snr_db=snr_db,
-                mcs=selected_mcs,
-                channel_type=config.channel_type,
-                rician_k_factor=getattr(config, "rician_k_factor", 2.0),
-            )
+            channel_uses = matched_budget["channel_uses"]
+            selected_mcs = matched_budget["selected_mcs"]
+            mcs_k, mcs_n, mcs_m = selected_mcs
+            baseline_u8 = matched_budget["bpg_ldpc_image"]
+            max_bytes = matched_budget["bpg_ldpc_max_bytes"]
+            bit_error_rate = matched_budget["bpg_ldpc_ber"]
+            crc_ok = matched_budget["bpg_ldpc_crc_ok"]
+            raw_bpg_u8 = matched_budget["bpg_raw_image"]
+            raw_bpg_max_bytes = matched_budget["bpg_raw_max_bytes"]
+            raw_bpg_ber = matched_budget["bpg_raw_ber"]
 
             model_psnr, model_ssim = _compute_psnr_ssim(original_u8, reconstructed_u8)
             baseline_psnr, baseline_ssim = _compute_psnr_ssim(original_u8, baseline_u8)
