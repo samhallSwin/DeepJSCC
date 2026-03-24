@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -69,11 +71,68 @@ def _write_nodata_report(rows, params, split_name):
                 "nodata_fraction",
                 "discarded",
             ],
-            delimiter="\t",
+            delimiter="	",
         )
         writer.writeheader()
         writer.writerows(rows)
     return str(report_path)
+
+
+def _nodata_cache_path(image_paths, params, split_name):
+    cache_dir = Path("logs") / "nodata_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    key_payload = {
+        "split_name": split_name,
+        "image_root": str(Path(image_paths[0]).resolve().parent) if image_paths else "",
+        "image_count": len(image_paths),
+        "first_image": image_paths[0] if image_paths else "",
+        "last_image": image_paths[-1] if image_paths else "",
+        "black_threshold": int(getattr(params, "nodata_black_threshold", 4)),
+        "white_threshold": int(getattr(params, "nodata_white_threshold", 251)),
+        "discard_threshold": float(getattr(params, "nodata_discard_threshold", 0.2)),
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(key_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return cache_dir / f"{split_name}_{cache_key}.tsv"
+
+
+def _load_nodata_cache(cache_path):
+    if not cache_path.exists():
+        return None
+
+    with cache_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="	")
+        rows = []
+        for row in reader:
+            rows.append(
+                {
+                    "image_path": row["image_path"],
+                    "black_fraction": float(row["black_fraction"]),
+                    "white_fraction": float(row["white_fraction"]),
+                    "nodata_fraction": float(row["nodata_fraction"]),
+                    "discarded": row["discarded"].lower() == "true",
+                }
+            )
+    return rows
+
+
+def _write_nodata_cache(rows, cache_path):
+    with cache_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "image_path",
+                "black_fraction",
+                "white_fraction",
+                "nodata_fraction",
+                "discarded",
+            ],
+            delimiter="	",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _scan_nodata_rows(image_paths, params, split_name):
@@ -86,10 +145,19 @@ def _scan_nodata_rows(image_paths, params, split_name):
     if cache_key in _NODATA_SCAN_CACHE:
         return _NODATA_SCAN_CACHE[cache_key]
 
+    cache_path = _nodata_cache_path(image_paths, params, split_name)
+    cached_rows = _load_nodata_cache(cache_path)
+    if cached_rows is not None:
+        print(f"[{split_name}] no-data scan: loaded cached results from {cache_path}")
+        report_path = _write_nodata_report(cached_rows, params, split_name)
+        _NODATA_SCAN_CACHE[cache_key] = (cached_rows, report_path)
+        return cached_rows, report_path
+
     black_threshold = int(getattr(params, "nodata_black_threshold", 4))
     white_threshold = int(getattr(params, "nodata_white_threshold", 251))
     discard_threshold = float(getattr(params, "nodata_discard_threshold", 0.2))
 
+    print(f"[{split_name}] no-data scan: computing fresh results for {len(image_paths)} images")
     rows = []
     for image_path in image_paths:
         with Image.open(image_path) as image:
@@ -109,6 +177,8 @@ def _scan_nodata_rows(image_paths, params, split_name):
             }
         )
 
+    _write_nodata_cache(rows, cache_path)
+    print(f"[{split_name}] no-data scan: saved cached results to {cache_path}")
     report_path = _write_nodata_report(rows, params, split_name)
     _NODATA_SCAN_CACHE[cache_key] = (rows, report_path)
     return rows, report_path
