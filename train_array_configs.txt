@@ -1,0 +1,4 @@
+--global_branch_output rgb  --local_branch_output rgb
+--global_branch_output rgb  --local_branch_output features
+--global_branch_output features --local_branch_output rgb
+--global_branch_output features --local_branch_output features

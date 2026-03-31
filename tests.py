@@ -233,6 +233,32 @@ def _dataset_class_names(config):
     )
 
 
+def _build_downstream_label_mapping(config, downstream_classifier):
+    dataset_class_names = _dataset_class_names(config)
+    if not dataset_class_names:
+        print(
+            "Skipping downstream accuracy metrics: "
+            f"no class directories were found under {config.test_dir}."
+        )
+        return None
+
+    missing_names = [
+        name for name in dataset_class_names
+        if name not in downstream_classifier.label_names
+    ]
+    if missing_names:
+        print(
+            "Skipping downstream accuracy metrics: dataset class names are not "
+            f"present in the downstream classifier labels: {missing_names}"
+        )
+        return None
+
+    return {
+        idx: downstream_classifier.label_names.index(name)
+        for idx, name in enumerate(dataset_class_names)
+    }
+
+
 def _get_downstream_classifier(config):
     if not getattr(config, "enable_downstream_metric", False):
         return None
@@ -766,18 +792,16 @@ def compare_to_BPG_LDPC(model, test_ds, train_ds, config):
     labeled_targets = None
 
     if downstream_classifier is not None:
-        labeled_images, labeled_targets = _collect_eval_samples_with_labels(config, num_images)
-        if not labeled_images:
-            raise RuntimeError("No labeled evaluation images were available for downstream metrics.")
-        originals = np.asarray(labeled_images, dtype=np.float32)
-        eval_batch_size = int(getattr(config, "eval_model_batch_size", 1))
-        predictions = _model_predict_batched(
-            model,
-            originals,
-            snr_db=config.train_snrdB,
-            batch_size=eval_batch_size,
-        )
-        channel_uses = _channel_uses_for_model(model, originals[0])
+        label_mapping = _build_downstream_label_mapping(config, downstream_classifier)
+        if label_mapping is None:
+            downstream_classifier = None
+        else:
+            labeled_images, labeled_targets = _collect_eval_samples_with_labels(config, num_images)
+            if not labeled_images:
+                raise RuntimeError("No labeled evaluation images were available for downstream metrics.")
+            predictions = _model_predict(model, np.asarray(labeled_images, dtype=np.float32), snr_db=config.train_snrdB)
+            originals = np.asarray(labeled_images, dtype=np.float32)
+            channel_uses = _channel_uses_for_model(model, originals[0])
 
     for images, _ in test_ds if downstream_classifier is None else []:
         predictions = _model_predict(model, _extract_images(images), snr_db=config.train_snrdB)
@@ -1063,7 +1087,10 @@ def compare_to_BPG_LDPC_sweep(model, test_ds, config):
     )
 
     downstream_classifier = _get_downstream_classifier(config)
-    downstream_classifier, label_mapping = _prepare_downstream_label_mapping(config, downstream_classifier)
+    if downstream_classifier is not None:
+        label_mapping = _build_downstream_label_mapping(config, downstream_classifier)
+        if label_mapping is None:
+            downstream_classifier = None
 
     channel_uses = None
     snr_step = getattr(config, "snr_eval_step", 1)
